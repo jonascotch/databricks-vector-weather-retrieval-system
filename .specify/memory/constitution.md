@@ -1,8 +1,12 @@
 <!--
 Sync Impact Report
-Version change: 1.1.0 → 1.1.1
-Modified principles: None
-Added or expanded sections: None
+Version change: 1.1.1 → 1.2.0
+Modified principles:
+- III. Retrieval Integrity: require source identity/type and freshness timestamps in each result.
+- V. Testability and Observability: explicitly test retrieval provenance and freshness metadata.
+Added or expanded sections:
+- Data and Platform Constraints: permit isolated local PostgreSQL/pgvector for development and tests.
+- Delivery and Quality Gates: require tests for retrieval source and freshness metadata.
 Removed sections: None
 Follow-up TODOs: None
 -->
@@ -33,9 +37,11 @@ separation pattern for raw documents and embeddings, including the
 document vectors MUST use compatible models and dimensions, matching the project's
 existing embedding dimensionality conventions. Semantic search MUST use pgvector's
 `<=>` cosine-distance operator, order results by ascending distance, apply explicit
-result limits, and return source and time metadata needed to assess relevance and
-freshness. Retrieval MUST NOT claim that similarity alone establishes truth or current
-conditions.
+result limits, and return source and freshness metadata with every result. Each result
+MUST include the source document identifier, source type, location, applicable provider
+issue/effective timestamps or forecast-period timestamps, and the synchronization time.
+Unavailable or inapplicable timestamp fields MUST be represented explicitly as null.
+Retrieval MUST NOT claim that similarity alone establishes truth or current conditions.
 
 ### IV. Contract-Driven API
 The Flask REST API MUST expose retrieval through a documented, stable request and
@@ -51,23 +57,29 @@ generated conclusions.
 Ingestion transformations and retrieval behavior MUST be testable independently of live
 external services. Tests MUST cover normalized document shape, chunk/vector association,
 embedding dimension compatibility, batch-job idempotence, cosine-distance ordering,
-API validation and error behavior, and database retrieval integration at the relevant
-boundaries. Operational logs MUST provide actionable failure context without exposing
-secrets. This keeps failures diagnosable and protects data integrity across the pipeline.
+retrieval source and freshness metadata, API validation and error behavior, and database
+retrieval integration at the relevant boundaries. Operational logs MUST provide
+actionable failure context without exposing secrets. This keeps failures diagnosable and
+protects data integrity across the pipeline.
 
 ## Data and Platform Constraints
 
-The implementation MUST use Lakebase (Postgres) with `pgvector` for persisted semantic
-search, `sentence-transformers` for text embeddings, and Python `psycopg2` for batch
-writes unless an approved amendment changes the architecture. Weather text MUST be
-harvested from a real-world public API in accordance with that provider's published
-access terms and rate limits. The schema MUST preserve normalized raw documents separately
-from their chunk embeddings, using relational references that prevent orphaned vectors.
-Vector columns MUST use the project's established embedding dimensions, and the embedding
-model and relevant configuration MUST be recorded to support compatible retrieval.
-Credentials and connection details MUST be supplied through the established secret or
-environment configuration, never committed to source control. Persisted text and vectors
-MUST retain the metadata needed for source traceability and freshness evaluation.
+The deployed application MUST use Lakebase (Postgres) with `pgvector` as its persisted
+semantic-search datastore, `sentence-transformers` for text embeddings, and Python
+`psycopg2` for batch writes unless an approved amendment changes the architecture.
+Isolated local development and automated tests MAY use local PostgreSQL with `pgvector`
+without Databricks credentials. Local databases MUST use the same schema, embedding
+dimensions, and vector operator semantics as Lakebase; local data MUST remain
+development/test data and MUST NOT replace or be promoted as the deployed Lakebase
+datastore. Weather text MUST be harvested from a real-world public API in accordance
+with that provider's published access terms and rate limits. The schema MUST preserve
+normalized raw documents separately from their chunk embeddings, using relational
+references that prevent orphaned vectors. Vector columns MUST use the project's
+established embedding dimensions, and the embedding model and relevant configuration
+MUST be recorded to support compatible retrieval. Credentials and connection details
+MUST be supplied through the established secret or environment configuration, never
+committed to source control. Persisted text and vectors MUST retain the metadata needed
+for source traceability and freshness evaluation.
 
 ## Delivery and Quality Gates
 
@@ -75,8 +87,8 @@ Changes MUST include focused automated tests for introduced or changed behavior.
 that require Lakebase, `pgvector`, model downloads, or the weather provider MUST be
 separable from the default test suite and use controlled dependencies or explicit
 configuration. Before a change is accepted, reviewers MUST verify the relevant tests,
-API contract, data lineage, secret handling, and compliance with this constitution.
-Any exception MUST be documented with its rationale and scope.
+API contract, data lineage, secret handling, retrieval freshness metadata, and compliance
+with this constitution. Any exception MUST be documented with its rationale and scope.
 
 ## Governance
 
@@ -95,4 +107,4 @@ requirement, justification, and any compensating measure. The constitution MUST 
 reviewed whenever the data source, storage or embedding architecture, or retrieval
 contract materially changes.
 
-**Version**: 1.1.1 | **Ratified**: 2026-11-22 | **Last Amended**: 2026-11-22
+**Version**: 1.2.0 | **Ratified**: 2026-11-22 | **Last Amended**: 2026-11-22
