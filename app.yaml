@@ -1,7 +1,7 @@
 command:
   - sh
   - -c
-  - exec gunicorn --bind "0.0.0.0:${DATABRICKS_APP_PORT}" app:app
+  - exec gunicorn --bind "0.0.0.0:${DATABRICKS_APP_PORT}" --timeout 300 --worker-class gthread --threads 8 app:app
 env:
   - name: LAKEBASE_ENDPOINT
     value: "projects/databricks-vector-weather-retrieval-system/branches/production/endpoints/primary"
