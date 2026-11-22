@@ -1,0 +1,240 @@
+openapi: 3.0.3
+info:
+  title: Weather Vector Search API
+  version: 1.0.0
+  description: >
+    API for synchronizing NWS narratives and searching their embeddings. Local
+    Docker Compose access is loopback-only. A Databricks Apps deployment is protected
+    by workspace authentication and app permissions; anonymous/public access is not
+    supported.
+servers:
+  - url: http://127.0.0.1:5000
+    description: Trusted local development
+paths:
+  /weather/sync:
+    post:
+      summary: Synchronize NWS documents for locations
+      description: >
+        Accepts city/state strings and/or coordinate objects. Syncs only alerts
+        affecting the selected point and its daily/hourly gridpoint forecast narratives.
+        A request can partially succeed by location. Each location has a budget of at
+        most 20 outbound NWS request attempts, including retries; exhausting the budget
+        stops further requests for that location and is reported as a partial outcome.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncRequest"
+            example:
+              locations:
+                - Chicago, IL
+                - lat: 30.2672
+                  lon: -97.7431
+              limit: 50
+      responses:
+        "200":
+          description: Sync completed, possibly with per-location failures.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          description: Malformed request or invalid limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: All locations failed validation or resolution; per-location errors are returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "502":
+          description: NWS service unavailable for all requested locations; per-location errors are returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "503":
+          description: Lakebase is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /weather/search:
+    post:
+      summary: Search weather narratives by meaning
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            example:
+              query: risk of flooding near rivers
+              top_k: 5
+      responses:
+        "200":
+          description: Search completed; matches may be empty if no current embeddings exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: Query is missing/malformed or top_k is not numeric.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Lakebase or the query encoder is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    LocationInput:
+      oneOf:
+        - type: string
+          minLength: 3
+          description: U.S. city and two-letter state abbreviation, such as Chicago, IL.
+        - type: object
+          required: [lat, lon]
+          additionalProperties: false
+          properties:
+            lat:
+              type: number
+              minimum: -90
+              maximum: 90
+            lon:
+              type: number
+              minimum: -180
+              maximum: 180
+    SyncRequest:
+      type: object
+      required: [locations]
+      additionalProperties: false
+      properties:
+        locations:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/LocationInput"
+        limit:
+          type: integer
+          minimum: 1
+          default: 50
+          description: Maximum total weather documents synchronized by this request.
+    LocationSyncResult:
+      type: object
+      required: [location, status, documents_synced, request_budget_exhausted]
+      properties:
+        location:
+          $ref: "#/components/schemas/LocationInput"
+        status:
+          type: string
+          enum: [synced, partial, failed]
+        documents_synced:
+          type: integer
+          minimum: 0
+        request_budget_exhausted:
+          type: boolean
+          description: True when the location reached its 20-attempt budget before sync completed.
+        error:
+          type: string
+          nullable: true
+    SyncResponse:
+      type: object
+      required: [documents_synced, locations]
+      properties:
+        documents_synced:
+          type: integer
+          minimum: 0
+        locations:
+          type: array
+          items:
+            $ref: "#/components/schemas/LocationSyncResult"
+    SearchRequest:
+      type: object
+      required: [query]
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+          minLength: 1
+        top_k:
+          type: integer
+          default: 5
+          description: Numeric values are clamped to 1–20.
+    SearchMatch:
+      type: object
+      required:
+        - document_id
+        - source_type
+        - location
+        - headline
+        - chunk_text
+        - similarity
+        - synced_at
+        - issued_at
+        - effective_at
+        - period_start
+        - period_end
+      properties:
+        document_id:
+          type: string
+        source_type:
+          type: string
+          enum: [alert, forecast]
+        location:
+          type: string
+        headline:
+          type: string
+          nullable: true
+        chunk_text:
+          type: string
+        similarity:
+          type: number
+          description: One minus pgvector cosine distance.
+        synced_at:
+          type: string
+          format: date-time
+        issued_at:
+          type: string
+          format: date-time
+          nullable: true
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+        period_start:
+          type: string
+          format: date-time
+          nullable: true
+        period_end:
+          type: string
+          format: date-time
+          nullable: true
+    SearchResponse:
+      type: object
+      required: [matches]
+      properties:
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchMatch"
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
