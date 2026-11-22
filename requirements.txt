@@ -1,0 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+Flask>=3.0,<4.0
+gunicorn>=22.0,<24.0
+requests>=2.31,<3.0
+psycopg2-binary>=2.9.9,<3.0
+pgvector>=0.3.6,<1.0
+torch==2.15.0+cpu
+sentence-transformers>=3.0,<6.0
+databricks-sdk>=0.35,<1.0

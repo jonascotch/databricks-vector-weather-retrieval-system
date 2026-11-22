@@ -36,8 +36,15 @@
   Databricks deployment, so those details remain part of the specification.
 - SC-001 requires traceability during a walkthrough but sets no maximum number of
   locations; any example location count is illustrative, not a capacity requirement.
+- FR-028 and User Story 1 acceptance scenarios specify that locations persist in one
+  shared list per deployment, are loaded for every authorized user, and remain saved
+  until removed; removal deletes unreferenced weather documents and chunks while
+  preserving data still associated with another saved location, and failure leaves the
+  location available for retry.
 - Constitution Principle V's automated-testing requirement is explicitly waived for this
   learning exercise in FR-027; the acceptance scenarios are manual demonstrations, not
   requirements to create automated tests or test infrastructure.
-- The specification is ready for planning. Downstream plan/task artifacts may need
-  alignment with the new frontend, 20-request-per-location cap, and testing waiver.
+- The plan, data model, API/frontend contracts, deployment SQL, and quickstart now cover
+  persistent shared locations, location/document associations, atomic orphan cleanup,
+  and preservation of data shared with another location. Regenerate tasks to implement
+  this design and migrate existing databases.

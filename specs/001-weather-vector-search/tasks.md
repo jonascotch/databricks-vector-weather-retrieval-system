@@ -6,103 +6,103 @@
 `contracts/weather-api.yaml`, `contracts/frontend.md`, `quickstart.md`, and
 `deployment.md`
 
-**Automated tests**: Not included. The specification's FR-027 documents the learning-
-exercise exception to Constitution Principle V. Tasks focus on implementation and the
-manual end-to-end demonstrations described in the quickstart.
+**Automated tests**: Not included. FR-027 waives automated tests for this learning
+exercise; each story has manual acceptance criteria.
 
-**Organization**: Tasks are grouped by the four P1 user stories. Shared project setup
-and database foundations precede story implementation.
+**Organization**: Tasks are grouped by the four P1 user stories. Setup and shared
+database prerequisites precede story implementation.
 
-**Path conventions**: The repository uses a small root-level Python Flask application,
-with `sql/`, `templates/`, `static/`, `notebooks/`, and `data/` at the repository root.
+**Path conventions**: The repository uses a root-level Flask application, with `sql/`,
+`templates/`, `static/`, `notebooks/`, and `data/` at the repository root.
 
 ## Phase 1: Setup
 
-**Purpose**: Establish dependencies, local configuration, and the development container
-stack.
+**Purpose**: Establish dependencies, local configuration, and the development stack.
 
-- [ ] T001 Create `requirements.txt` with Flask, Gunicorn, requests, psycopg2, pgvector, sentence-transformers, and databricks-sdk; do not add pytest or test-only dependencies.
-- [ ] T002 [P] Add `.env.example`, `.gitignore`, and `.dockerignore`; document local-only variable names and exclude `.env`, `.venv`, downloaded `data/us_places.txt`, and model caches.
-- [ ] T003 Create `Dockerfile` and `docker-compose.yml` with the planned Python app and `pgvector/pgvector:0.8.7-pg16-trixie` database service; gate app startup on database health, use a named volume, mount `sql/` read-only, bind the app port to `127.0.0.1`, and do not publish the database port.
+- [X] T001 [P] Add Flask, Gunicorn, requests, psycopg2, pgvector, sentence-transformers, and databricks-sdk to `requirements.txt`; do not add automated-test or test-only dependencies.
+- [X] T002 [P] Add local variable placeholders and exclude secrets, downloaded Gazetteer data, and model caches in `.env.example`, `.gitignore`, and `.dockerignore`.
+- [X] T003 Configure `Dockerfile` and `docker-compose.yml` for Python 3.11 and PostgreSQL/pgvector; wait for database health, use a named volume, mount `sql/weather_schema.sql` for fresh-volume initialization, publish only the app on `127.0.0.1`, and do not publish the database port.
 
 ## Phase 2: Foundational
 
-**Purpose**: Create the shared database schema and connection boundary needed by the
-weather sync, embedding, and search stories.
+**Purpose**: Establish the shared schema, safe schema upgrade, and database connection
+used by all user stories.
 
-- [ ] T004 [P] Create `sql/weather_schema.sql` and enable the `vector` extension before creating the tables. For `weather_documents`, define a text primary-key `id`, required `location`, latitude and longitude within valid geographic ranges, required NWS grid fields, required `source_type` enum `alert` or `forecast`, `forecast_type` as `daily` or `hourly` for forecasts and null for alerts, nullable `headline`, required non-empty `narrative_text`, required `narrative_hash`, nullable `issued_at` and `effective_at`, required forecast `period_start` and `period_end` and null alert periods, original `payload` as `jsonb`, `synced_at`, and `embedding_status` enum `pending`, `current`, or `stale` defaulting to `pending`. For `weather_embeddings`, define a bigint identity ID, a cascading foreign key to `weather_documents.id`, zero-based `chunk_index` with `chunk_index >= 0`, non-empty `chunk_text` with 800-character chunks and 100-character overlap, `chunk_hash`, `vector(384)` embedding, `model_name`, `model_revision`, and `created_at`; enforce unique `(document_id, chunk_index)` and add document B-tree and cosine HNSW indexes.
-- [ ] T005 [P] Implement `lakebase.py` with the `get_connection()` context manager and `RealDictCursor`; support local `DATABASE_URL` and Databricks `PG*` settings, obtain a fresh Lakebase OAuth credential for each new Psycopg 2 connection, require Lakebase SSL, and never log secrets or tokens.
+- [X] T004 Create `sql/weather_schema.sql` with all fields in `data-model.md` for `weather_saved_locations`, `weather_documents`, `weather_location_documents`, and `weather_embeddings`; enforce `input_type IN ('city_state', 'coordinates')`, `latitude >= -90 AND latitude <= 90`, `longitude >= -180 AND longitude <= 180`, nullable unresolved coordinates/grid values, non-empty narratives/chunk text, `source_type IN ('alert', 'forecast')`, forecast type in `('daily', 'hourly')` with period/grid fields required, null alert forecast/period/grid fields, `embedding_status IN ('pending', 'current', 'stale')`, `chunk_index >= 0`, `vector(384)`, cascading document-to-embedding foreign key, unique `(document_id, chunk_index)`, the location/document composite key, and the cosine HNSW and join indexes.
+- [X] T005 Create `sql/migrations/001_saved_location_associations.sql` as a versioned transaction that backfills saved locations and document associations from each distinct legacy location/coordinate/grid tuple; preserve existing document and embedding rows, relax legacy `NOT NULL` constraints needed by the new schema, leave legacy columns in place, and fail without partial migration if any document cannot be associated.
+- [X] T006 [P] Implement `get_connection()` in `lakebase.py` for local `DATABASE_URL` and Databricks `PG*` settings; use `RealDictCursor`, refresh Lakebase OAuth credentials for each new connection, require Lakebase SSL, and never log secrets or tokens.
 
-**Checkpoint**: Shared schema and connection setup are ready before story work begins.
+**Checkpoint**: Fresh and existing databases can provide persistent saved locations,
+document associations, and the shared connection boundary.
 
 ## Phase 3: User Story 1 - Sync Weather for Selected Locations (Priority: P1)
 
-**Goal**: Let users select locations in the frontend and synchronize normalized,
-location-specific NWS alert and forecast documents.
+**Goal**: Persist a shared location list, synchronize only saved locations, and remove
+orphaned weather data when a location is deleted.
 
-**Independent Demonstration**: Open the local page, add a city/state and a coordinate
-location, synchronize them, and review each location's outcome, document count, and any
-request-budget exhaustion.
+**Independent Test**: Add a location, reload the page, and confirm it remains. Sync it,
+then remove it and confirm its association disappears and documents/chunks used only by
+that location are deleted. If a document is shared with another saved location, confirm
+it remains searchable only with the remaining location listed.
 
-- [ ] T006 [P] [US1] Implement `weather_client.py` to load the pinned Census Gazetteer, resolve exact city/state matches, validate coordinates in the ranges latitude -90 to 90 and longitude -180 to 180, normalize coordinates to at most four decimal places, resolve NWS `/points`, follow returned daily/hourly forecast URLs, fetch point-specific alerts, and normalize documents with stable IDs, labeled alert description/instruction, source payloads, and available timestamps. Enforce at most 20 outbound NWS request attempts per location per sync, including retries; pace NWS Alerts service requests at no more than one request every 30 seconds across the process; honor cache headers and other rate guidance; and report when that location's budget stops retrieval.
-- [ ] T007 [P] [US1] Add weather-document upsert operations in `lakebase.py` keyed by stable `id`; create new documents with `embedding_status = 'pending'`, mark changed narratives `stale`, preserve current embeddings on metadata-only updates, and retain source provenance and timestamps.
-- [ ] T008 [US1] Implement `GET /` and `POST /weather/sync` in `app.py`; accept city/state strings and `{ "lat": number, "lon": number }` objects, default `limit` to 50 documents per request and cap the total synchronized documents at the supplied limit, process valid locations despite other location failures, report each location's result and request-budget exhaustion, and return clear validation/operational errors without exposing credentials.
-- [ ] T009 [P] [US1] Create `templates/index.html`, `static/weather.js`, and `static/weather.css` for the location workflow: add/remove multiple city/state or coordinate entries, validate required input, submit `POST /weather/sync`, prevent duplicate pending submissions, and display per-location status, document count, partial failures, and request-budget exhaustion with accessible labels and status messages.
+- [X] T007 [US1] Add saved-location list, create, and delete operations in `lakebase.py`; store UUID `id`, `input_type`, JSON `input_value`, display label, nullable resolved coordinates/grid fields, and creation time; in one transaction remove the location and associations, delete documents with no remaining association, cascade their chunks/vectors, preserve shared documents, and return deletion/retention counts.
+- [X] T008 [US1] Implement `GET /weather/locations`, `POST /weather/locations`, and `DELETE /weather/locations/{location_id}` in `app.py`; validate city/state strings of at least 3 characters, require `lat` in `[-90, 90]` and `lon` in `[-180, 180]`, validate UUIDs, return the documented response/error shapes, and report a failed deletion without claiming success.
+- [X] T009 [US1] Update `POST /weather/sync` in `app.py` to accept saved-location IDs, resolve each saved input, retain the 20-attempt-per-location limit and partial outcomes, and atomically upsert each source document with its `weather_location_documents` association while preserving global alert IDs and forecast grid/type/period identities.
+- [X] T010 [US1] Update `templates/index.html`, `static/weather.js`, and `static/weather.css` to load the shared list on page open, add through `POST /weather/locations`, remove through `DELETE /weather/locations/{location_id}`, update the list only after server success, submit only saved IDs for sync, and display accessible validation, deletion-count, and operational feedback.
 
 ## Phase 4: User Story 2 - Prepare Weather Narratives for Search (Priority: P1)
 
-**Goal**: Convert synchronized narratives into compatible, traceable searchable chunks.
+**Goal**: Produce deterministic searchable chunks and vectors for associated weather
+documents.
 
-**Independent Demonstration**: Synchronize a document, run the embedding batch process,
-and confirm that its chunk records link to the document and its embedding status becomes
-current only after reconciliation completes.
+**Independent Test**: Sync a document and run the embedding process; confirm its chunks
+are linked to it and it becomes searchable only after the complete chunk set is saved.
+Run the process again and confirm unchanged chunks are not duplicated.
 
-- [ ] T010 [US2] Implement `weather_embeddings.py` with deterministic 800-character sliding-window chunks and 100-character overlap, at least one chunk for shorter narratives, stable chunk ordering and hashes, a pinned `sentence-transformers/all-MiniLM-L6-v2` revision, one encoder load per process, and validation of exactly 384 numeric finite values.
-- [ ] T011 [US2] Implement `notebooks/ingest_weather_embeddings.py` to read pending/stale `weather_documents` through `lakebase.py`, register pgvector's Psycopg 2 adapter, reuse unchanged chunks for the same model revision, batch writes with `psycopg2` and `execute_values` or conflict-safe inserts, cast vectors explicitly, and reconcile obsolete/changed chunks in one transaction. Mark a document current only after its complete expected chunk set is stored; do not use Spark JDBC.
+- [X] T011 [P] [US2] Implement deterministic 800-character sliding-window chunking with 100-character overlap, stable order and hashes, a pinned `sentence-transformers/all-MiniLM-L6-v2` revision, one encoder per process, and validation of exactly 384 finite numeric values in `weather_embeddings.py`.
+- [X] T012 [US2] Implement `notebooks/ingest_weather_embeddings.py` to process only documents with saved-location associations, reuse unchanged chunks, batch writes through `lakebase.py`, and transactionally replace obsolete/changed chunks while setting a document current only after its complete expected chunk set is stored; do not use Spark JDBC.
 
 ## Phase 5: User Story 3 - Search Weather Narratives (Priority: P1)
 
-**Goal**: Let users enter a natural-language query and review ranked weather passages
-with source and freshness metadata.
+**Goal**: Return ranked weather passages with complete provenance and all remaining
+saved-location associations.
 
-**Independent Demonstration**: After embedding documents, enter a query in the browser
-page and review the ranked matches, source type, location, similarity, and applicable
-timestamps; observe the clear empty state if no searchable embeddings exist.
+**Independent Test**: Search after embedding and confirm each chunk appears once, lists
+all associated saved locations, and includes source/freshness fields; remove one
+association and confirm it no longer appears while a shared document remains available
+for another location.
 
-- [ ] T012 [P] [US3] Implement `POST /weather/search` in `app.py`; reuse the process-level encoder, reject missing, blank, or malformed queries and non-numeric `top_k`, default `top_k` to 5 and clamp numeric values to 1–20, return an empty match list when no current embeddings exist, search only current compatible embeddings with `ORDER BY embedding <=> %s::vector LIMIT %s`, calculate similarity as one minus cosine distance, and return `document_id`, `source_type`, `location`, `headline`, `chunk_text`, `similarity`, `synced_at`, `issued_at`, `effective_at`, `period_start`, and `period_end`, representing unavailable/inapplicable timestamps as null.
-- [ ] T013 [P] [US3] Extend `templates/index.html`, `static/weather.js`, and `static/weather.css` with the semantic-search form; submit the query to `POST /weather/search`, display returned matches in relevance order with all fields defined by `contracts/frontend.md`, render provider text as text rather than HTML, and show clear validation, request-error, and empty-result states.
+- [X] T013 [US3] Implement `POST /weather/search` in `app.py`; validate query and `top_k`, default to 5 and clamp to 1–20, use the process-level encoder and `<=>`, filter to current documents with active location associations, aggregate all associated location labels before applying the result limit, and return each chunk once with the contract fields and nullable timestamps.
+- [X] T014 [P] [US3] Update `templates/index.html`, `static/weather.js`, and `static/weather.css` to submit semantic queries, show ranked matches with all associated locations and source/freshness metadata, render provider text as text, and provide clear validation, request-error, and empty-result states.
 
 ## Phase 6: User Story 4 - Run Locally and Deploy to Databricks (Priority: P1)
 
-**Goal**: Demonstrate the full local workflow and make the same application deployable as
-a Lakebase-backed Databricks App.
+**Goal**: Demonstrate the complete workflow locally and document its Lakebase-backed
+Databricks deployment.
 
-**Independent Demonstration**: Start the local Compose stack without Databricks
-credentials, use the browser page to sync and search after embedding, then follow the
-deployment guide to demonstrate the same flow for an authorized workspace user when
-Databricks resources are available.
+**Independent Test**: Follow the local guide without Databricks credentials, verify
+location persistence across reloads and database-container recreation, and follow the
+deployment guide to configure the shared schema and app permissions for Databricks.
 
-- [ ] T014 [P] [US4] Add root `app.yaml` to run the Flask application through Gunicorn on `0.0.0.0` and `DATABRICKS_APP_PORT`; configure only non-secret app settings, including `LAKEBASE_ENDPOINT`, and rely on the Lakebase resource for injected `PG*` and managed app-identity credentials.
-- [ ] T015 [P] [US4] Create `README_WEATHER.md` documenting the NWS source choice, schema, 800/100 chunking, model/dimensions, frontend location and search workflows, the 20-request-per-location cap, NWS alert-request pacing and cache guidance, local Compose setup, sync→embed→search instructions, Lakebase SQL/deployment steps, workspace permissions, known limitations, and the learning-exercise testing waiver.
-- [ ] T016 [US4] Demonstrate the local workflow using `specs/001-weather-vector-search/quickstart.md` and the deployment workflow in `specs/001-weather-vector-search/deployment.md`; confirm the frontend experience, per-location request-budget status, current search metadata, and persistence across database container recreation without deleting the named volume.
+- [X] T015 [P] [US4] Add root `app.yaml` to run Flask through Gunicorn on `0.0.0.0` and `DATABRICKS_APP_PORT`, configure non-secret settings including `LAKEBASE_ENDPOINT`, and use the Lakebase resource's managed app identity.
+- [X] T016 [P] [US4] Create `README_WEATHER.md` documenting NWS source/limits, schema and migration, chunking/model dimensions, persistent shared-location management and deletion behavior, local Compose workflow, sync→embed→search, Lakebase deployment, access permissions, known limitations, and the testing waiver.
+- [X] T017 [US4] Complete the manual workflows in `specs/001-weather-vector-search/quickstart.md` and `specs/001-weather-vector-search/deployment.md`; verify fresh-schema setup, legacy-data migration, location persistence, sync limits, embedding/search metadata, deletion of orphaned chunks, and retention of documents shared by another location.
 
 ## Phase 7: Polish and Cross-Cutting Concerns
 
-**Purpose**: Keep operational diagnostics, local and deployed security boundaries, and
-published documentation consistent.
+**Purpose**: Ensure actionable diagnostics, safe operation, and documentation consistency.
 
-- [ ] T017 Review `.gitignore`, `.dockerignore`, `docker-compose.yml`, `app.yaml`, `sql/weather_schema.sql`, and `README_WEATHER.md`; ensure local secrets and Gazetteer data are excluded, local access is loopback-only, Databricks access is permission-scoped, and documented DDL/grants match the executable schema.
-- [ ] T018 Review `specs/001-weather-vector-search/contracts/weather-api.yaml`, `specs/001-weather-vector-search/contracts/frontend.md`, `specs/001-weather-vector-search/quickstart.md`, and `specs/001-weather-vector-search/deployment.md` against the implemented sync limit, per-location request cap, frontend behavior, and search freshness fields; update any mismatched documentation.
-- [ ] T019 Implement actionable, secret-redacted operational logging with Python's standard `logging` module in `weather_client.py`, `app.py`, `weather_embeddings.py`, `notebooks/ingest_weather_embeddings.py`, and `lakebase.py`; for sync, search, embedding/reconciliation, and database connection/query failures, record the operation, failure category, and safe location/document identifiers where available, include sanitized exception context, and preserve existing error propagation and API contracts. Omit or redact credentials, OAuth tokens, DSNs, request headers, raw provider payloads, and SQL parameter values from log records.
+- [X] T018 Implement actionable, secret-redacted logging in `weather_client.py`, `app.py`, `weather_embeddings.py`, `notebooks/ingest_weather_embeddings.py`, and `lakebase.py`; log operation, failure category, and safe location/document IDs for sync, search, embedding, saved-location creation/removal, and database failures without logging credentials, OAuth tokens, DSNs, headers, raw provider payloads, or SQL parameter values.
+- [X] T019 Review `sql/weather_schema.sql`, `sql/migrations/001_saved_location_associations.sql`, `specs/001-weather-vector-search/contracts/weather-api.yaml`, `specs/001-weather-vector-search/contracts/frontend.md`, `specs/001-weather-vector-search/quickstart.md`, `specs/001-weather-vector-search/deployment.md`, and `README_WEATHER.md` against the implemented routes, shared-document cleanup, grants, and search fields; correct any mismatch.
 
 ## Dependencies and Execution Order
 
 ```mermaid
 graph LR
     Setup[Phase 1 Setup] --> Foundation[Phase 2 Foundation]
-    Foundation --> US1[US1 Sync locations]
-    US1 --> US2[US2 Embed narratives]
-    US2 --> US3[US3 Search narratives]
+    Foundation --> US1[US1 Saved locations and sync]
+    US1 --> US2[US2 Embedding]
+    US2 --> US3[US3 Search]
     US3 --> US4[US4 Local and Databricks]
     US4 --> Polish[Phase 7 Polish]
 ```
@@ -111,62 +111,52 @@ graph LR
 
 - **Setup (Phase 1)**: No dependencies; creates the Python project and local container
   stack.
-- **Foundational (Phase 2)**: Depends on Setup; the shared schema and connection helper
-  block all user stories.
-- **US1 (Phase 3)**: Depends on Foundation; creates source documents required by embedding
-  and search.
-- **US2 (Phase 4)**: Depends on US1 documents and database upsert behavior.
-- **US3 (Phase 5)**: Depends on US2's compatible embeddings and US1's browser shell.
+- **Foundational (Phase 2)**: Depends on Setup; schema, upgrade migration, and connection
+  helper block all user stories.
+- **US1 (Phase 3)**: Depends on Foundation; persists locations and produces associated
+  source documents.
+- **US2 (Phase 4)**: Depends on US1 documents and database operations.
+- **US3 (Phase 5)**: Depends on US2's compatible embeddings and US1's saved-location UI.
 - **US4 (Phase 6)**: Depends on US1–US3 for the complete local and deployed workflow.
 - **Polish (Phase 7)**: Depends on the desired stories being complete.
 
 ### Parallel Opportunities
 
-- T001 and T002 modify separate setup files and can proceed in parallel.
-- T004 and T005 modify separate foundational files and can proceed in parallel.
-- Within US1, T006, T007, and T009 affect separate files and can proceed in parallel;
-  T008 integrates the client and database behavior.
-- Within US3, T012 and T013 affect separate backend/frontend files and can proceed in
-  parallel after US2 is complete.
-- Within US4, T014 and T015 affect separate files and can proceed in parallel; T016
-  requires the full pipeline.
+- T001 and T002 can run in parallel; T003 follows them.
+- T004 and T006 can run in parallel; T005 follows T004.
+- In US3, T013 and T014 can run in parallel after US2 because they modify the API and
+  frontend respectively.
+- In US4, T015 and T016 can run in parallel; T017 requires the full workflow.
 - User stories are sequentially dependent: US2 requires US1, US3 requires US2, and the
-  full US4 demonstration requires US1–US3.
+  complete US4 demonstration requires US1–US3.
 
-### Parallel Examples by User Story
+## Parallel Examples by User Story
 
-**US1**
+**US1**: No parallel tasks within the story; database operations, routes, sync, and UI
+are integrated in dependency order.
 
-```text
-Task T006: NWS client and normalization in weather_client.py
-Task T007: Weather-document persistence operations in lakebase.py
-Task T009: Location entry and synchronization UI in templates/index.html, static/weather.js, and static/weather.css
-After those tasks:
-Task T008: Sync endpoint integration in app.py
-```
-
-**US2**
+**US2**:
 
 ```text
-Task T010: Chunking and model encoding in weather_embeddings.py
+Task T011: Chunking and model encoding in weather_embeddings.py
 Then:
-Task T011: Psycopg 2 batch reconciliation in notebooks/ingest_weather_embeddings.py
+Task T012: Batch persistence and reconciliation in notebooks/ingest_weather_embeddings.py
 ```
 
-**US3**
+**US3**:
 
 ```text
-Task T012: Semantic-search endpoint in app.py
-Task T013: Search form and result display in templates/index.html, static/weather.js, and static/weather.css
+Task T013: Search endpoint in app.py
+Task T014: Search UI in templates/index.html, static/weather.js, and static/weather.css
 ```
 
-**US4**
+**US4**:
 
 ```text
-Task T014: Databricks app runtime configuration in app.yaml
-Task T015: Local and Databricks runbook in README_WEATHER.md
+Task T015: Databricks runtime configuration in app.yaml
+Task T016: User/deployment documentation in README_WEATHER.md
 Then:
-Task T016: Manual local/deployment demonstration using quickstart.md and deployment.md
+Task T017: Manual walkthrough using quickstart.md and deployment.md
 ```
 
 ## Implementation Strategy
@@ -174,24 +164,19 @@ Task T016: Manual local/deployment demonstration using quickstart.md and deploym
 ### MVP First
 
 1. Complete Setup and Foundation.
-2. Complete US1 to deliver location-based NWS synchronization through the browser.
-3. Continue with US2 and US3 to complete the required sync → embed → semantic-search
-   learning flow.
-4. Complete US4 for reproducible local execution and Databricks deployment guidance.
+2. Complete US1 to persist/manage locations, synchronize weather, and remove orphaned
+   documents and chunks while preserving shared source documents.
+3. Stop for US1's manual acceptance walkthrough; this is the MVP increment.
+4. Complete US2 and US3 to deliver the full sync → embed → search learning flow.
+5. Complete US4 and Polish for local and Databricks delivery.
 
-### Incremental Delivery
+### Task Counts
 
-1. Setup + Foundation: runnable local scaffold, schema, and connection boundary.
-2. US1: normalized weather documents, request-budget enforcement, and location UI.
-3. US2: transactional chunk and embedding batch pipeline.
-4. US3: search endpoint and browser search/results interface.
-5. US4: local Compose workflow and Databricks Apps/Lakebase deployment.
-6. Polish: align configuration boundaries and feature documentation.
-
-## Notes
-
-- All implementation tasks use `- [ ] Tnnn [P?] [USn?] ...`; story tasks include their
-  user-story label, while setup, foundational, and polish tasks do not.
-- `[P]` marks work on separate files that can proceed after its stated prerequisites.
-- Automated test tasks are intentionally omitted under spec FR-027; the quickstart and
-  user-story demonstrations are not requirements to add test suites or fixtures.
+- Setup: 3
+- Foundational: 3
+- US1: 4
+- US2: 2
+- US3: 2
+- US4: 3
+- Polish: 2
+- **Total: 19 tasks**

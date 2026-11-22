@@ -1,0 +1,9 @@
+command:
+  - sh
+  - -c
+  - exec gunicorn --bind "0.0.0.0:${DATABRICKS_APP_PORT}" app:app
+env:
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/<project-id>/branches/<branch-id>/endpoints/<endpoint-id>"
+  - name: NWS_USER_AGENT
+    value: "weather-vector-search/1.0 (contact: replace-with-your-email@example.com)"

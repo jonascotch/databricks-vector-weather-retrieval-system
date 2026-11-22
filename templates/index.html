@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Weather document search</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='weather.css') }}">
+    <script defer src="{{ url_for('static', filename='weather.js') }}"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Weather learning project</p>
+        <h1>Weather documents</h1>
+        <p>Choose U.S. locations and synchronize their NWS alerts and forecasts.</p>
+      </header>
+
+      <section aria-labelledby="locations-heading">
+        <h2 id="locations-heading">Locations</h2>
+        <p class="hint">Add city/state locations or latitude/longitude coordinates to the shared saved list.</p>
+        <form id="location-entry-form" novalidate>
+          <fieldset class="location-mode">
+            <legend>Location input type</legend>
+            <div class="mode-options">
+              <label class="mode-option">
+                <input type="radio" name="location-mode" value="city-state" checked>
+                City and state
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="location-mode" value="coordinates">
+                Coordinates
+              </label>
+            </div>
+          </fieldset>
+          <div id="city-state-fields" class="entry-fields">
+            <label for="city-state">City, state</label>
+            <input id="city-state" name="city-state" type="text" autocomplete="address-level2" placeholder="Chicago, IL">
+          </div>
+          <div id="coordinate-fields" class="entry-fields coordinate-fields" hidden>
+            <label for="latitude">Latitude
+              <input id="latitude" name="latitude" type="number" step="any" min="-90" max="90" placeholder="41.8781">
+            </label>
+            <label for="longitude">Longitude
+              <input id="longitude" name="longitude" type="number" step="any" min="-180" max="180" placeholder="-87.6298">
+            </label>
+          </div>
+          <p id="location-error" class="status" role="alert" aria-live="polite"></p>
+          <p id="location-status" class="status" role="status" aria-live="polite"></p>
+          <div class="actions">
+            <button type="submit" class="secondary" id="add-location">Add location</button>
+          </div>
+        </form>
+        <div class="selected-section" aria-labelledby="selected-heading">
+          <h3 id="selected-heading">Selected locations</h3>
+          <p id="empty-locations" class="hint">No saved locations yet.</p>
+          <ul id="selected-locations" class="selected-location-list" aria-live="polite"></ul>
+        </div>
+        <div class="actions">
+          <button type="button" id="sync-button" disabled>Synchronize weather</button>
+        </div>
+        <p id="sync-status" class="status" role="status" aria-live="polite"></p>
+        <div id="sync-results" class="results" aria-live="polite"></div>
+      </section>
+
+      <aside class="notice">
+        Each location is limited to 20 NWS request attempts per synchronization, including
+        retries. Alert requests are paced according to NWS guidance.
+      </aside>
+
+      <section aria-labelledby="search-heading">
+        <h2 id="search-heading">Semantic search</h2>
+        <p class="hint">Search the embedded weather narratives by meaning.</p>
+        <form id="search-form">
+          <label for="search-query">Search query</label>
+          <input id="search-query" name="query" type="text" required
+                 placeholder="Risk of flooding near rivers">
+          <div class="actions">
+            <button type="submit" id="search-button">Search weather</button>
+          </div>
+        </form>
+        <p id="search-status" class="status" role="status" aria-live="polite"></p>
+        <div id="search-results" class="search-results" aria-live="polite"></div>
+      </section>
+    </main>
+  </body>
+</html>

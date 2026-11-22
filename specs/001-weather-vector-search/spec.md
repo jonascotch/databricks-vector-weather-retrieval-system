@@ -17,6 +17,7 @@
 - Q: For each selected location, should synchronization include only alerts affecting that location or all active alerts in its state? → A: Include only alerts affecting the specific selected location.
 - Q: When an NWS alert has both a description and an instruction, which text should be included in the searchable narrative? → A: Include both fields with clear labels so search can retrieve hazard explanations and recommended actions without conflating them.
 - Q: When the same location and forecast period are synchronized again, should the system replace the existing forecast document or keep each version as history? → A: Upsert one current document per location, forecast type, and forecast period; do not retain historical versions.
+- Q: If a weather alert is associated with two saved locations and one is removed, should its document and chunks remain for the other location? → A: Remove the deleted location's association and retain the shared document and chunks while another saved location still references them; delete them when no saved locations reference them.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -28,7 +29,11 @@ behavior for implementation and demonstration; they do not require automated tes
 
 A user adds one or more U.S. locations in the frontend and starts a sync. The page shows
 the outcome and document count for each location. Locations may be entered as city/state
-names or latitude/longitude coordinates.
+names or latitude/longitude coordinates. A single location-entry form lets the user
+choose either input mode; each added location appears in a separate selected-location
+list and can be removed before synchronization. The list is saved for the application
+deployment, so the same locations are available to all authorized users across visits
+and browser sessions.
 
 **Why this priority**: Without current, location-specific source documents, the rest of
 the pipeline has no weather content to search.
@@ -53,6 +58,19 @@ sync, and review the reported outcomes.
 5. **Given** a request contains multiple locations and one cannot be resolved,
    **When** synchronization completes, **Then** valid locations are still processed and
    the response identifies the failed location.
+6. **Given** the user adds locations in either input mode, **When** an entry is accepted,
+   **Then** it appears in the selected-location list, can be removed there, and only the
+   remaining listed locations are submitted for synchronization.
+7. **Given** locations have been saved by an authorized user, **When** any authorized
+   user opens or reloads the frontend, **Then** the current shared location list is
+   displayed.
+8. **Given** an authorized user adds or removes a location, **When** the change
+   succeeds, **Then** it remains reflected for other users and later visits to the same
+   application deployment. When removal succeeds, that location is no longer associated
+   with its weather documents. Documents and chunks no longer associated with any saved
+   location are deleted; shared documents remain available for other saved locations.
+   If removal fails, the location and its data remain available and the frontend reports
+   the failure.
 
 ---
 
@@ -84,8 +102,8 @@ that the resulting documents are available to semantic search.
 ### User Story 3 - Search Weather Narratives (Priority: P1)
 
 A user enters a natural-language question in the frontend and receives the most relevant
-weather narrative passages, with location, source type, freshness details, and similarity
-information.
+weather narrative passages, with the associated saved location or locations, source
+type, freshness details, and similarity information.
 
 **Why this priority**: Search is the user-facing value of the ingestion and embedding
 pipeline.
@@ -96,8 +114,9 @@ passages and their source and freshness details.
 **Acceptance Scenarios**:
 
 1. **Given** searchable documents exist, **When** the user submits a valid query,
-   **Then** the page displays the requested highest-relevance passages with location,
-   headline, source type, available timestamps, chunk text, and similarity score.
+   **Then** the page displays the requested highest-relevance passages with their
+   associated saved location or locations, headline, source type, available timestamps,
+   chunk text, and similarity score.
 2. **Given** no embeddings exist, **When** the user searches, **Then** the system returns
    an empty result set with a clear response rather than an internal error.
 3. **Given** a missing, blank, or malformed query, **When** the user searches,
@@ -148,6 +167,9 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   reconciled successfully; a failed refresh does not restore stale vectors.
 - A document is shorter than one chunk, exactly one chunk, or spans multiple overlapping
   chunks.
+- The saved-location list cannot be loaded, a location change cannot be persisted, or
+  weather data for a location cannot be deleted; the frontend reports the failure and
+  does not present an unsuccessful change as complete.
 - A document exists but has no embedding, or its stored embedding model/dimension differs
   from the active query model.
 - The search query is valid but no indexed content is relevant.
@@ -178,7 +200,8 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   daily and hourly forecasts. State-wide alerts unrelated to the requested point and
   separate Area Forecast Discussion products are not included in this feature.
 - **FR-004**: The system MUST normalize each source item into a document record with a
-  stable deduplication identifier, location, source type, headline or event,
+  stable deduplication identifier, association with one or more saved locations,
+  source type, headline or event,
   embeddable narrative text, available issue/effective timestamps, original payload for
   provenance, and synchronization time. Alert identifiers MUST use the provider's stable
   alert ID. Forecast identifiers MUST be based on location, daily/hourly forecast type,
@@ -188,9 +211,9 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
 - **FR-005**: The system MUST store normalized documents in a Lakebase table named
   `weather_documents`, following the project's `get_connection()` context-manager
   pattern and using `psycopg2` with `RealDictCursor`.
-- **FR-006**: The system MUST provide `POST /weather/sync`, accepting a `locations` list
-  and optional `limit`. The default limit MUST be 50 documents per request; the limit
-  MUST cap the total documents synchronized in that request.
+- **FR-006**: The system MUST provide `POST /weather/sync`, accepting a list of saved
+  locations and optional `limit`. The default limit MUST be 50 documents per request;
+  the limit MUST cap the total documents synchronized in that request.
 - **FR-006a**: A single sync operation MUST make no more than 20 outbound weather API
   request attempts for each selected location. This count MUST include retries and all
   weather API endpoints called for that location. Once its budget is exhausted, the
@@ -231,10 +254,11 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   document vectors, with the model loaded once for the application rather than once per
   request. It MUST rank results with pgvector's `<=>` cosine-distance operator. Returned
   similarity MUST be calculated as one minus cosine distance.
-- **FR-015**: Each search result MUST include the source document identifier, location,
-  source type, headline, matched chunk text, similarity score, synchronization time, and
-  applicable issue/effective or forecast-period timestamps. Unavailable or inapplicable
-  timestamps MUST be represented as null.
+- **FR-015**: Each search result MUST include the source document identifier, all saved
+  locations still associated with that document, source type, headline, matched chunk
+  text, similarity score, synchronization time, and applicable issue/effective or
+  forecast-period timestamps. Unavailable or inapplicable timestamps MUST be represented
+  as null.
 - **FR-016**: Search MUST return an empty result collection when no embeddings exist.
   Missing, blank, or malformed queries MUST receive a clear validation response.
 - **FR-017**: The system MUST document the selected weather source, schema and chunking
@@ -259,20 +283,40 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   and create the weather document and embedding tables, constraints, grants, and search
   indexes in Lakebase.
 - **FR-024**: The system MUST provide a simple browser frontend that lets users add and
-  remove multiple U.S. locations as city/state names or latitude/longitude pairs, start
-  synchronization, and see per-location outcomes and synchronized document counts.
+  remove multiple U.S. locations as city/state names or latitude/longitude pairs. The
+  frontend MUST use a single location-entry form that lets the user choose city/state
+  or coordinate input, then add a valid location to a separate selected-location list.
+  Each listed location MUST be removable, and synchronization MUST submit only the
+  locations currently in that list. The frontend MUST also start synchronization and
+  show per-location outcomes and synchronized document counts.
 - **FR-025**: The frontend MUST provide a text input for semantic-search queries and
-  display ranked matches with their location, source type, headline, chunk text,
-  similarity, and applicable freshness timestamps.
+  display ranked matches with every saved location still associated with each match,
+  source type, headline, chunk text, similarity, and applicable freshness timestamps.
 - **FR-026**: The frontend MUST present clear validation or operational feedback when
   location input is invalid, synchronization fails, search input is empty, or no
-  searchable results exist.
+  searchable results exist. It MUST also clearly report failures to load or persist the
+  shared saved-location list or delete location data, and MUST NOT present an
+  unsuccessful location change as complete.
 - **FR-027**: For this learning exercise only, the automated-testing requirement in
   Constitution Principle V is waived because automated testing is not an assessed
   deliverable. No automated test suites, test fixtures, or dedicated test infrastructure
   are required. As the compensating measure, the implementation and documentation MUST
   support manually demonstrating the end-to-end user flows described in this
   specification.
+- **FR-028**: The system MUST persist one shared saved-location list per application
+  deployment for all authorized users. The frontend MUST load the current list whenever
+  it is opened or refreshed, retain additions across visits and browser sessions, and
+  persist removals so removed locations are absent from later views and synchronization
+  requests. Changes made by one authorized user MUST be visible to other authorized
+  users of that deployment. A successful removal MUST remove that location's
+  associations with its weather documents. The system MUST delete documents and their
+  chunks and vectors when no saved locations remain associated with them; a document
+  still associated with another saved location MUST remain available only for the
+  remaining locations and search results MUST include only its remaining saved
+  locations. Removed locations MUST NOT appear in search results or future sync
+  requests. Removal MUST be all-or-nothing: if the associations and any now-
+  unreferenced data cannot be removed, the saved location and its associations remain
+  available, the frontend reports the failure, and the removal can be retried.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -284,10 +328,15 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   and period start/end.
 - **Weather Embedding**: An ordered text chunk and its vector, linked to one weather
   document and identified with the model used to create it.
-- **Search Match**: A document chunk returned for a query with location, source type,
-  headline, similarity, and source/freshness timestamps.
-- **Frontend Session**: A user's selected locations, synchronization outcomes, and
-  current search query and results during use of the simple browser interface.
+- **Saved Location**: A city/state name or coordinate pair in the shared list for one
+  application deployment, available for synchronization until an authorized user
+  removes it. Successful removal also deletes its synchronized weather documents and
+  associated chunks and vectors.
+- **Search Match**: A document chunk returned for a query with all saved locations
+  still associated with its source document, source type, headline, similarity, and
+  source/freshness timestamps.
+- **Frontend Session**: A user's current synchronization outcomes, search query, and
+  results during use of the simple browser interface.
 
 ## Success Criteria *(mandatory)*
 
@@ -311,6 +360,13 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
 - **SC-008**: An authorized Databricks workspace user can complete the documented
   deployment flow and run sync-to-search against Lakebase after the included schema SQL
   has been applied.
+- **SC-009**: 100% of locations successfully added to the shared list remain visible to
+  authorized users after a page reload or a later browser session, until removed.
+- **SC-010**: After a successful add or removal, another authorized user sees the same
+  updated location list on their next page load or refresh.
+- **SC-011**: After a successful removal, zero weather documents or associated chunks
+  remain associated with that location. Documents shared with another saved location
+  remain searchable for that location; removed locations never appear in search results.
 
 ## Assumptions
 
@@ -337,6 +393,12 @@ the Lakebase schema and deploy the app for an authorized Databricks workspace us
   above 20 are clamped to the supported range; non-numeric values are rejected.
 - If an individual location fails during a multi-location sync, successful locations
   still complete and the response reports the failed locations.
+- Saved locations are shared among authorized users of the same application deployment;
+  local and Databricks deployments maintain separate lists.
+- Removing a saved location deletes its associations to weather documents and deletes
+  documents and chunks/vectors no longer referenced by any saved location. Data shared
+  with another saved location is retained for that location; deletion failure leaves the
+  saved location and its associations available for retry.
 - The optional GET search with generated summaries, scheduled sync jobs, additional
   weather sources, source-type filters, and index-performance benchmarks are stretch
   goals and are not required for the initial release.

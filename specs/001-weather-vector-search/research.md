@@ -127,18 +127,23 @@ Sources: [all-MiniLM-L6-v2 model card](https://huggingface.co/sentence-transform
 ## Browser frontend
 
 **Decision**: Serve a single HTML page from Flask, with local CSS and browser-native
-JavaScript calling the same-origin sync and search endpoints. Keep selected locations
-and search state in the page; do not introduce a separate frontend framework, build
-pipeline, authentication layer, or persistent browser state.
+JavaScript calling same-origin location-management, sync, and search endpoints. Use one
+location-entry form with an accessible city/state-versus-coordinates mode selector.
+After validation, the form saves a display-only item to the shared persistent
+location list; sync submits only saved items. Search matches display every saved
+location still associated with the source document.
 
 **Rationale**: The requested interface needs only location entry, sync feedback, query
 submission, and ranked result display. A small same-origin page meets those needs while
 using the existing application and deployment boundary.
 
-**Alternatives considered**: A separate SPA framework or frontend service would add
-dependencies and deployment complexity without a corresponding feature requirement.
-Keep embedding as the documented batch-process step between synchronization and search;
-adding a UI action that launches that process is outside the current frontend scope.
+**Alternatives considered**: Keeping editable city/state and coordinate inputs in every
+selected row mixes location entry with selection management and makes the active input
+mode unclear; the separate form and selected list distinguish those responsibilities.
+A separate SPA framework or frontend service would add dependencies and deployment
+complexity without a corresponding feature requirement. Keep embedding as the documented
+batch-process step between synchronization and search; adding a UI action that launches
+that process is outside the current frontend scope.
 
 **Safety and usability**: Provide labels and visible status/error messages, render source
 text as text rather than HTML, and never collect credentials in the page. Local access
@@ -153,6 +158,33 @@ Sources: [Flask templates](https://flask.palletsprojects.com/en/stable/templatin
 [Flask web security](https://flask.palletsprojects.com/en/stable/web-security/),
 [WAI form labels](https://www.w3.org/WAI/tutorials/forms/labels/),
 [WAI form notifications](https://www.w3.org/WAI/tutorials/forms/notifications/).
+
+## Persistent shared locations and data cleanup
+
+**Decision**: Persist saved locations in the shared application database. Keep weather
+documents globally deduplicated by provider identity and relate each document to every
+saved location for which it was synchronized. A location removal deletes the saved
+location and its document associations in one transaction, then deletes documents with
+no remaining saved-location associations; the document foreign key cascades deletion to
+its chunks and vectors. Shared documents remain available to any remaining associated
+locations. Return all remaining associated location labels with each search match.
+
+**Rationale**: NWS alert identifiers are stable globally, and one alert can cover more
+than one saved location. Removing one location must clean up its data without removing
+shared weather evidence from another location. A transactional association cleanup
+preserves referential integrity and supports the specification's all-or-nothing removal
+behavior.
+
+**Alternatives considered**: Keeping the list only in browser storage does not preserve
+it across users or sessions. Deleting every document linked to a removed location would
+also remove shared alerts needed by other saved locations. Duplicating globally
+identified alert documents per location would undermine stable-ID deduplication.
+
+**API decision**: Provide same-origin list, add, and delete operations for saved
+locations. The frontend sync request references saved-location IDs rather than
+reconstructing or resubmitting unsaved input. A failed removal rolls back and returns a
+clear error; successful responses distinguish deleted orphan documents from documents
+retained for other locations.
 
 ## Local Docker Compose execution
 
@@ -169,9 +201,12 @@ startup races, and the volume preserves homework data across container recreatio
 
 **Schema decision**: Keep one idempotent SQL script for both backends. It creates the
 `weather` schema, enables `vector`, creates the two tables and constraints, and adds
-the B-tree and HNSW cosine indexes. Run extension creation with a database owner/admin.
-The app's local connection settings and Databricks resource connection settings remain
-environment-specific.
+the B-tree and HNSW cosine indexes. Mount it into the Compose database's
+`/docker-entrypoint-initdb.d` directory so it runs when a fresh named volume is
+initialized; for an existing volume, apply the idempotent script explicitly with the
+database owner/admin when updating the schema. Run extension creation with a database
+owner/admin. The app's local connection settings and Databricks resource connection
+settings remain environment-specific.
 
 **Alternatives considered**: Running only the Flask process locally against Lakebase
 would still require Databricks credentials and network access. SQLite cannot reproduce

@@ -13,7 +13,13 @@ by cosine distance. Provide two execution targets: a Docker Compose stack with l
 PostgreSQL/pgvector for development without Databricks, and a Databricks App backed by
 Lakebase for the intended deployment. The interface lets users add locations, sync
 weather, enter a semantic-search query, and review ranked results with source and
-freshness metadata. Each selected location is limited to 20 outbound NWS request
+freshness metadata. Location entry uses one form with a city/state or coordinate mode;
+accepted locations are saved in one shared, persistent list per app deployment, and
+sync submits only that list. Removing a location removes its association to synchronized
+documents and deletes documents/chunks that no remaining saved location references;
+shared source documents remain available to their other locations. Search results list
+all locations still associated with each match.
+Each selected location is limited to 20 outbound NWS request
 attempts per sync, including retries. City/state inputs use the U.S. Census Gazetteer
 Places file to find representative coordinates; coordinate inputs go directly to NWS
 `/points`. A document state prevents stale chunks from appearing in search while changed
@@ -32,8 +38,9 @@ framework or build tool is required.
 
 **Storage**: Local PostgreSQL with `pgvector` in Compose for development; Lakebase
 PostgreSQL with `pgvector` for Databricks deployment. Both targets use the same schema
-SQL, `jsonb` source payloads, `vector(384)` embeddings, relational document/chunk
-records, and an HNSW cosine index.
+SQL, persistent saved-location records and location/document associations, `jsonb`
+source payloads, `vector(384)` embeddings, relational document/chunk records, and an HNSW
+cosine index.
 
 **Automated Testing**: Not required for this learning exercise. Specification FR-027
 documents the scoped exception to Constitution Principle V, with end-to-end manual
@@ -64,7 +71,10 @@ per serving process.
 Local Compose must work without Databricks credentials and bind its published app port
 to localhost. Databricks Apps must use its Lakebase resource and managed service-principal
 identity, with OAuth credentials refreshed for new Psycopg 2 connections. Do not expose
-an unauthenticated endpoint publicly.
+an unauthenticated endpoint publicly. Persist saved locations and document/location
+associations. Add, remove, and orphan-document cleanup must complete atomically; deleting
+one location must not delete source documents still associated with another saved
+location.
 
 **Scale/Scope**: U.S. locations only, location-specific alerts, daily/hourly gridpoint
 forecasts, 50 documents per sync by default, and one current document per alert identity
@@ -80,9 +90,9 @@ benchmark is required.
 | Principle / constraint | Status | Evidence |
 |---|---|---|
 | Source fidelity and provenance | PASS | Normalized records retain source payload, location, source type, and source/forecast times. |
-| Reproducible, idempotent ingestion | PASS | Stable alert/forecast identities, deterministic chunking, and per-document reconciliation are specified. |
-| Retrieval integrity | PASS | Search uses matching 384-dimension vectors, filters non-current documents, orders by cosine distance, and returns source/freshness metadata. |
-| Contract-driven API | PASS | Sync/search request, response, validation, limits, and error shapes are specified in `contracts/weather-api.yaml`; browser interactions are specified in `contracts/frontend.md`. |
+| Reproducible, idempotent ingestion | PASS | Stable alert/forecast identities, deterministic chunking, location/document associations, and transactional cleanup of unreferenced documents are specified. |
+| Retrieval integrity | PASS | Search uses matching 384-dimension vectors, filters non-current or unassociated documents, orders by cosine distance, and returns source/freshness metadata with every associated saved location. |
+| Contract-driven API | PASS | Saved-location CRUD, sync/search requests, response, validation, limits, and error shapes are specified in `contracts/weather-api.yaml`; the shared location list, deletion behavior, and search display are specified in `contracts/frontend.md`. |
 | Testability and observability | DOCUMENTED EXCEPTION | Spec FR-027 waives automated testing for this learning exercise; the scope, rationale, and manual end-to-end demonstration are documented. Task T019 specifies actionable failure context and secret-redacted logs across sync, search, embedding, and database operations. |
 | Data/platform constraints | PASS | Lakebase, pgvector, Sentence Transformers, and psycopg2 are retained; Spark JDBC is excluded. |
 | Local and deployment security boundary | PASS | Local Compose is loopback-only; Databricks Apps uses workspace SSO and app permissions, with no anonymous/public access. |
@@ -110,7 +120,7 @@ specs/001-weather-vector-search/
 ### Source Code (repository root)
 
 ```text
-app.py                              # Flask UI, sync, and search routes
+app.py                              # Flask UI, saved-location, sync, and search routes
 weather_client.py                  # Census place lookup and NWS client
 lakebase.py                        # Database connection helper for local and Lakebase
 weather_embeddings.py              # Chunking, model loading, and reconciliation
@@ -127,7 +137,9 @@ static/
 ├── weather.js                      # Browser interactions with the REST API
 └── weather.css                     # Minimal responsive styling
 sql/
-└── weather_schema.sql             # Shared, idempotent local/Lakebase DDL
+├── weather_schema.sql             # Shared, idempotent local/Lakebase DDL
+└── migrations/
+    └── 001_saved_location_associations.sql  # Upgrade existing database data
 notebooks/
 └── ingest_weather_embeddings.py   # Standalone psycopg2 batch entry point
 README_WEATHER.md
@@ -135,30 +147,44 @@ data/
 └── us_places.txt                  # Downloaded Census Gazetteer; not committed
 ```
 
-**Structure Decision**: The workspace currently contains Spec Kit metadata and no
-application source or dependency manifest. Add a small root-level Flask service and
-focused client, database, embedding, and browser assets rather than introducing a larger
-package hierarchy. Serve `templates/index.html` at `/` and use browser-native JavaScript
+**Structure Decision**: The workspace already has a root-level Flask service, NWS
+client, database/schema helpers, local Compose setup, and initial location-sync
+interface. Extend those assets with the remaining embedding, search, deployment, and
+documentation work rather than introducing a larger package hierarchy. Serve
+`templates/index.html` at `/` and use browser-native JavaScript
 to call the documented REST endpoints; keep frontend assets local and avoid an additional
-framework or build system. Keep the shared DDL in `sql/weather_schema.sql`; use it for
-both the Compose database and Lakebase. Mount the script read-only into the database
-container for explicit application with `psql`. Compose publishes the Flask port only on
-`127.0.0.1`, keeps PostgreSQL on the internal service network, waits for database health,
-and stores database files in a named volume. Databricks Apps uses a root `app.yaml`,
-Gunicorn, Lakebase database resource, and the app service principal. Keep the downloaded
-Gazetteer file and local `.env` out of source control.
+framework or build system. The page has a single location-entry form with an accessible
+city/state-versus-coordinates mode selector. Adding a valid value appends a read-only
+display of that location to the shared, persisted selected list; each item has a remove
+action. Sync submits only saved locations. Removing an item deletes its location
+associations and any weather documents/chunks no other saved location references, in
+one transaction; shared documents remain linked to the locations that still use them.
+Keep the shared DDL in `sql/weather_schema.sql`; use it for both the Compose
+database and Lakebase. Mount the script read-only at
+`/docker-entrypoint-initdb.d/10-weather_schema.sql` so a fresh Compose database initializes the schema
+automatically; reapply the idempotent script explicitly for an already-initialized
+volume only to create missing objects; use a versioned migration to alter existing
+objects and backfill location associations. The migration keeps legacy document
+location columns but relaxes their `NOT NULL` constraints, along with legacy grid
+columns, because the normalized model stores locations only in the saved-location and
+association tables. Compose publishes the Flask port only on `127.0.0.1`,
+keeps PostgreSQL on the internal service network, waits for database health, and stores
+database files in a named volume. Databricks Apps uses a root `app.yaml`, Gunicorn,
+Lakebase database resource, and the app service principal. Keep the downloaded Gazetteer
+file and local `.env` out of source control.
 
 ## Post-Design Constitution Check
 
 | Gate | Status | Design evidence |
 |---|---|---|
-| Source fidelity and provenance | PASS | `weather_documents` records identify the NWS item and location, retain raw payloads, and keep timestamps. |
-| Reproducible, idempotent ingestion | PASS | Unique logical IDs, content hashes, versioned model metadata, and transactional chunk reconciliation prevent duplicates and stale results. |
-| Retrieval integrity | PASS | HNSW uses `vector_cosine_ops`; query uses `<=>`; only current-document chunks are eligible, and each match includes required provenance and applicable timestamps. |
-| Contract-driven API | PASS | OpenAPI defines both endpoints, validation, per-location request-budget status, and search metadata; the frontend contract defines location entry and result display. |
+| Source fidelity and provenance | PASS | `weather_documents` retain stable NWS identity, raw payloads, and timestamps; the association table traces each document to all saved locations using it. |
+| Reproducible, idempotent ingestion | PASS | Unique logical IDs, content hashes, versioned model metadata, transactional chunk reconciliation, and atomic location cleanup prevent duplicates, orphans, and stale results. |
+| Retrieval integrity | PASS | HNSW uses `vector_cosine_ops`; query uses `<=>`; only current-document chunks with active location associations are eligible, and each match includes all associated locations and source/freshness metadata. |
+| Contract-driven API | PASS | OpenAPI defines saved-location CRUD plus sync/search endpoints, validation, per-location request-budget status, deletion outcomes, and search metadata; the frontend contract defines persistent list behavior, deletion, and result display. |
 | Testability and observability | DOCUMENTED EXCEPTION | FR-027 records the learning-exercise test waiver, its scope and rationale, and manual demonstration as the compensating measure; T019 specifies actionable, secret-redacted logs for operational failures. |
 | Platform, quality, and security constraints | PASS | The production/course target remains Lakebase with psycopg2 writes; local PostgreSQL is a development equivalent. Compose is loopback-only, while Databricks Apps enforces workspace SSO and app permissions. |
 
-Retrieval results include source type and applicable timestamps, the browser interface
-shows them, and sync responses report when a location reaches the 20-request budget.
+Retrieval results include associated locations, source type, and applicable timestamps.
+The browser interface shows them, and sync responses report when a location reaches the
+20-request budget.
 No gate failures remain beyond the documented, user-directed testing exception.

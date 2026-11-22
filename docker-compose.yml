@@ -1,0 +1,35 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg16-trixie
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-weather}
+      POSTGRES_USER: ${POSTGRES_USER:-weather}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - weather_data:/var/lib/postgresql/data
+      - ./sql/weather_schema.sql:/docker-entrypoint-initdb.d/10-weather_schema.sql:ro
+      - ./sql/migrations:/docker-entrypoint-migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://weather:change-this-local-password@db:5432/weather}
+      NWS_USER_AGENT: ${NWS_USER_AGENT:?Set NWS_USER_AGENT in .env}
+      PORT: "5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-5000}:5000"
+    volumes:
+      - ./data:/app/data:ro
+
+volumes:
+  weather_data:

@@ -28,21 +28,40 @@ docker compose up --build --wait
 ```
 
 The app is published on `127.0.0.1`; PostgreSQL/pgvector is reachable only from the
-Compose network. The database uses a named volume. Apply or update the shared schema SQL
-using the local database owner:
+Compose network. The database uses a named volume. On first startup, PostgreSQL applies
+the shared schema SQL automatically. If the named volume was initialized before the
+schema was added, apply the idempotent SQL using the local database owner. For an
+existing schema whose table definitions need to change, run the documented versioned
+migration; re-running `CREATE TABLE IF NOT EXISTS` does not alter existing tables.
 
 ```bash
 docker compose exec db sh -lc \
-  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f /schema/weather_schema.sql'
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/10-weather_schema.sql'
 ```
 
-Expected result: the `weather` schema contains `weather_documents` and
-`weather_embeddings`, with `vector(384)` and a cosine HNSW index.
+Expected result: the `weather` schema contains `weather_saved_locations`,
+`weather_documents`, `weather_location_documents`, and `weather_embeddings`, with
+`vector(384)` and a cosine HNSW index.
+
+For an existing legacy database, apply the versioned migration before using the updated
+application:
+
+```bash
+docker compose exec -T db sh -lc \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f /docker-entrypoint-migrations/001_saved_location_associations.sql'
+```
+
+The migration keeps legacy document columns and rows, backfills saved locations and
+associations, and relaxes old `NOT NULL` constraints that conflict with the new
+document model. It runs in one transaction; inspect and resolve any reported failure
+before deploying the updated app.
 
 ## Sync, embed, and search through the frontend
 
-Open the browser interface at `http://127.0.0.1:5000/`. Add a city/state location and,
-optionally, a latitude/longitude location. Start synchronization from the page.
+Open the browser interface at `http://127.0.0.1:5000/`. Choose city/state or coordinate
+mode in the location-entry form, enter a location, and add it to the saved-location
+list. Reload the page and confirm the location remains. Add a second location and
+synchronize the saved locations from the page.
 
 Expected result: the page shows documents synchronized and an outcome for each location.
 A location with no current alerts may still receive
@@ -62,10 +81,16 @@ complete chunk set is committed.
 Return to the page, enter a natural-language question, and submit the search.
 
 Expected result: up to five relevant passages appear in cosine-relevance order, with
-location, source type, headline, chunk text, similarity, synchronization time, and
-applicable issue/effective or forecast-period timestamps. Unavailable timestamps are
-shown as unavailable. If no embeddings exist yet, the page explains that there are no
-searchable results and points the user to the embedding step above.
+all associated saved locations, source type, headline, chunk text, similarity,
+synchronization time, and applicable issue/effective or forecast-period timestamps.
+Unavailable timestamps are shown as unavailable. If no embeddings exist yet, the page
+explains that there are no searchable results and points the user to the embedding step
+above.
+
+Remove a saved location that has synchronized data. Confirm it disappears from the
+shared list and that weather documents and chunks used only by that location are
+deleted. If a document is also associated with another saved location, confirm it
+remains searchable with only the remaining location shown.
 
 ## Stop
 

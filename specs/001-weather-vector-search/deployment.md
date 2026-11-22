@@ -21,16 +21,29 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE SCHEMA IF NOT EXISTS weather;
 
+CREATE TABLE IF NOT EXISTS weather.weather_saved_locations (
+    id UUID PRIMARY KEY,
+    input_type TEXT NOT NULL
+        CHECK (input_type IN ('city_state', 'coordinates')),
+    input_value JSONB NOT NULL,
+    display_location TEXT NOT NULL
+        CHECK (length(trim(display_location)) > 0),
+    latitude DOUBLE PRECISION
+        CHECK (latitude IS NULL OR (latitude >= -90 AND latitude <= 90)),
+    longitude DOUBLE PRECISION
+        CHECK (longitude IS NULL OR (longitude >= -180 AND longitude <= 180)),
+    grid_id TEXT,
+    grid_x INTEGER,
+    grid_y INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((latitude IS NULL) = (longitude IS NULL))
+);
+
 CREATE TABLE IF NOT EXISTS weather.weather_documents (
     id TEXT PRIMARY KEY,
-    location TEXT NOT NULL,
-    latitude DOUBLE PRECISION NOT NULL
-        CHECK (latitude >= -90 AND latitude <= 90),
-    longitude DOUBLE PRECISION NOT NULL
-        CHECK (longitude >= -180 AND longitude <= 180),
-    grid_id TEXT NOT NULL,
-    grid_x INTEGER NOT NULL,
-    grid_y INTEGER NOT NULL,
+    grid_id TEXT,
+    grid_x INTEGER,
+    grid_y INTEGER,
     source_type TEXT NOT NULL
         CHECK (source_type IN ('alert', 'forecast')),
     forecast_type TEXT,
@@ -52,6 +65,9 @@ CREATE TABLE IF NOT EXISTS weather.weather_documents (
             AND forecast_type IS NULL
             AND period_start IS NULL
             AND period_end IS NULL
+            AND grid_id IS NULL
+            AND grid_x IS NULL
+            AND grid_y IS NULL
         )
         OR
         (
@@ -61,8 +77,19 @@ CREATE TABLE IF NOT EXISTS weather.weather_documents (
             AND period_start IS NOT NULL
             AND period_end IS NOT NULL
             AND period_end > period_start
+            AND grid_id IS NOT NULL
+            AND grid_x IS NOT NULL
+            AND grid_y IS NOT NULL
         )
     )
+);
+
+CREATE TABLE IF NOT EXISTS weather.weather_location_documents (
+    saved_location_id UUID NOT NULL
+        REFERENCES weather.weather_saved_locations(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL
+        REFERENCES weather.weather_documents(id) ON DELETE CASCADE,
+    PRIMARY KEY (saved_location_id, document_id)
 );
 
 CREATE TABLE IF NOT EXISTS weather.weather_embeddings (
@@ -83,6 +110,9 @@ CREATE TABLE IF NOT EXISTS weather.weather_embeddings (
 CREATE INDEX IF NOT EXISTS weather_embeddings_document_id_idx
     ON weather.weather_embeddings (document_id);
 
+CREATE INDEX IF NOT EXISTS weather_location_documents_document_id_idx
+    ON weather.weather_location_documents (document_id);
+
 CREATE INDEX IF NOT EXISTS weather_embeddings_embedding_hnsw_idx
     ON weather.weather_embeddings
     USING hnsw (embedding vector_cosine_ops);
@@ -95,6 +125,34 @@ CREATE INDEX IF NOT EXISTS weather_documents_embedding_status_idx
 does not alter an already-existing table if a later implementation changes its
 definition. Any future schema evolution must use a versioned migration rather than
 relying on this bootstrap DDL to change existing columns.
+
+Generate saved-location UUIDs in the application. When removing a location, use one
+transaction to remove its associations and saved-location row, then delete weather
+documents with no remaining location associations. The `weather_embeddings` foreign key
+cascades deletion to chunks and vectors; documents still associated with other saved
+locations remain searchable there.
+
+### Upgrade an existing weather database
+
+The original schema stored one `location` and coordinate set directly on each
+`weather_documents` row and did not persist the frontend location list. Do not rely on
+the bootstrap SQL above to transform such a database. Apply a versioned migration before
+deploying the new application:
+
+1. Create `weather_saved_locations` and `weather_location_documents`.
+2. Backfill one saved location for each distinct legacy location/coordinate/grid tuple,
+   preserving its display label and resolved NWS values.
+3. Associate each existing weather document with the saved location represented by its
+   legacy location fields. Keep existing documents and embedding rows; do not rebuild
+   vectors solely because of this migration.
+4. Verify every document has at least one location association before switching the app
+   to the new search and deletion behavior.
+
+The migration must run transactionally and be safe to resume or explicitly report a
+failure without dropping existing weather data. It retains legacy document location
+columns but makes them nullable, as well as the legacy grid columns, so new alert rows
+can use the normalized shared-document schema. Existing source documents and embedding
+rows remain intact.
 
 ### Lakebase app-role grants
 
@@ -157,13 +215,15 @@ development only.
    maintainers. Databricks Apps requires workspace authentication and does not permit
    anonymous/public access; the Flask routes do not add a separate per-user auth layer.
 7. **Demonstrate the live flow.** Open the app URL from its Databricks overview page,
-   add one or more locations in the frontend, and synchronize them. Review the
-   per-location outcome and whether the 20-request budget was exhausted. The server caps
-   attempts at 20 per location per sync, including retries. Run the embedding batch
-   process with the deployed app's database configuration, then enter a search query in
-   the frontend and review its ranked matches and source/freshness metadata. Confirm rows
-   and the HNSW index in the Lakebase SQL editor. A first connection may take longer
-   while Lakebase scales up.
+   add one or more locations in the frontend, reload the page to confirm persistence,
+   and synchronize them. Review the per-location outcome and whether the 20-request
+   budget was exhausted. The server caps attempts at 20 per location per sync, including
+   retries. Run the embedding batch process with the deployed app's database
+   configuration, then enter a search query in the frontend and review its ranked
+   matches, all associated saved locations, and source/freshness metadata. Remove a
+   location and confirm only documents no longer associated with any saved location and
+   their chunks are deleted. Confirm rows and the HNSW index in the Lakebase SQL editor.
+   A first connection may take longer while Lakebase scales up.
 
 ## Local Compose demonstration
 

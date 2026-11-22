@@ -2,10 +2,12 @@
 
 ## Overview
 
-Persist source documents separately from their searchable chunks. Weather documents
-carry the lifecycle state used to prevent stale or incomplete chunks from being returned.
-Search matches are projections of a document and one of its current chunks; they are not
-stored independently.
+Persist shared saved locations separately from globally deduplicated source documents,
+and keep searchable chunks in their own table. A join table records which saved
+locations currently use each source document. Weather documents carry the lifecycle
+state used to prevent stale or incomplete chunks from being returned. Search matches
+are projections of a document, its current chunk, and all current saved-location
+associations; they are not stored independently.
 
 The tables are created in the PostgreSQL `weather` schema by the shared, idempotent
 `sql/weather_schema.sql` script. The same DDL targets local PostgreSQL/pgvector and
@@ -13,20 +15,24 @@ Lakebase; owner/admin setup and app-role grants are described in [deployment.md]
 
 ## Entities
 
-### WeatherLocation
+### SavedLocation (`weather_saved_locations`)
 
 | Field | Type | Rules |
 |---|---|---|
-| input | string or object | City/state string or `{lat, lon}` coordinates. |
-| latitude, longitude | decimal | Required after resolution; must be within valid geographic ranges and inside NWS coverage. Normalize to no more than four decimal places for NWS `/points`. |
-| grid_id | string | NWS office/grid identifier returned by `/points`. |
-| grid_x, grid_y | integer | NWS grid coordinates returned by `/points`. |
-| display_location | string | Resolved city/state label or normalized coordinate label. |
+| id | UUID, primary key | Stable saved-location identifier used by the frontend and sync request. |
+| input_type | text | `city_state` or `coordinates`. |
+| input_value | jsonb | Validated city/state string or `{lat, lon}` pair entered by the user. |
+| display_location | text | Readable city/state label or normalized coordinate label. |
+| latitude, longitude | decimal, nullable | Resolved coordinates; valid geographic ranges and NWS coverage required before sync. |
+| grid_id | text, nullable | NWS office/grid identifier returned by `/points`. |
+| grid_x, grid_y | integer, nullable | NWS grid coordinates returned by `/points`. |
+| created_at | timestamptz | Time the shared location was added. |
 
 City/state lookup uses normalized exact name plus two-letter state abbreviation against
 the pinned U.S. Census Gazetteer Places file. No match or multiple matches are a
-validation error; the caller can resubmit using coordinates. The resolved NWS grid tuple
-is the canonical identity for forecast upserts.
+validation error; the caller can resubmit using coordinates. Resolve and persist the
+NWS grid tuple when syncing. All authorized users of the same application deployment
+read and manage the same saved-location rows.
 
 For each location within a sync operation, count every outbound NWS request attempt,
 including retries, against an independent budget of 20. When the budget is exhausted,
@@ -34,14 +40,31 @@ stop requests for that location and report a partial outcome with the budget-exh
 indicator.
 Requests made for another location do not use this budget.
 
+### WeatherLocationDocument (`weather_location_documents`)
+
+| Field | Type | Rules |
+|---|---|---|
+| saved_location_id | UUID, foreign key | References `weather_saved_locations.id` with `ON DELETE CASCADE`. |
+| document_id | text, foreign key | References `weather_documents.id` with `ON DELETE CASCADE`. |
+
+Use `(saved_location_id, document_id)` as the primary key. One source document can be
+associated with more than one saved location, and one saved location can reference many
+documents. This preserves global NWS alert identity and prevents deleting a shared alert
+when only one of its saved locations is removed.
+
+Constraints and indexes:
+
+- Foreign keys cascade association-row deletion when either a saved location or source
+  document is deleted.
+- The composite primary key prevents duplicate associations.
+- Add a B-tree index on `document_id` for orphan cleanup and document-to-location joins.
+
 ### WeatherDocument (`weather_documents`)
 
 | Field | Type | Rules |
 |---|---|---|
 | id | text, primary key | Alert: stable NWS feature ID. Forecast: deterministic key from NWS grid tuple, cadence (`daily`/`hourly`), and period start/end. |
-| location | text | Required display location. |
-| latitude, longitude | numeric | Resolved source point. |
-| grid_id, grid_x, grid_y | text/integer | Resolved NWS grid point used for source retrieval. |
+| grid_id, grid_x, grid_y | text/integer, nullable | NWS grid point for forecast source identity; null for alerts. |
 | source_type | text | Required; `alert` or `forecast`. |
 | forecast_type | text, nullable | `daily` or `hourly` for forecast rows; null for alerts. |
 | headline | text, nullable | NWS alert headline/event or forecast period name. |
@@ -58,6 +81,9 @@ Requests made for another location do not use this budget.
 
 - Alert documents upsert by NWS feature ID.
 - Forecast documents upsert by NWS grid tuple, forecast type, period start, and period end.
+- A document is associated with each saved location for which it was synchronized.
+- Documents remain globally deduplicated; a shared alert or forecast can be linked to
+  multiple saved locations.
 - A narrative change updates the document and sets `embedding_status = 'stale'`.
 - Metadata-only updates that do not change normalized narrative do not invalidate vectors.
 - A change to the active model revision or chunking configuration marks affected
@@ -71,7 +97,7 @@ Requests made for another location do not use this budget.
 | Field | Type | Rules |
 |---|---|---|
 | id | bigint identity, primary key | Generated per chunk row. |
-| document_id | text, foreign key | References `weather_documents.id`; cascading delete is acceptable. |
+| document_id | text, foreign key | References `weather_documents.id`; deletion MUST cascade to all chunk/vector rows. |
 | chunk_index | integer | Zero-based, deterministic chunk order. |
 | chunk_text | text | Non-empty narrative segment, produced with 800-character size and 100-character overlap. |
 | chunk_hash | text | Hash of exact chunk text; used to reuse unchanged vectors. |
@@ -91,18 +117,31 @@ Constraints and indexes:
 
 ### SearchMatch
 
-Transient result fields: `document_id`, `source_type`, `location`, `headline`,
-`chunk_text`, `similarity`, `synced_at`, `issued_at`, `effective_at`, `period_start`,
-and `period_end`. Similarity is `1 - (embedding <=> query_vector)`. Each timestamp field
-is present in the response; unavailable or inapplicable values are null. Only embeddings
-joined to documents with `embedding_status = 'current'` and created with the active
-model revision are eligible.
+Transient result fields: `document_id`, `source_type`, `locations` (all display labels
+from current `weather_location_documents` associations), `headline`, `chunk_text`,
+`similarity`, `synced_at`, `issued_at`, `effective_at`, `period_start`, and `period_end`.
+Similarity is `1 - (embedding <=> query_vector)`. Each timestamp field is present in the
+response; unavailable or inapplicable values are null. Only embeddings joined to
+documents with `embedding_status = 'current'`, at least one current saved-location
+association, and the active model revision are eligible.
 
 ### FrontendSession
 
-Ephemeral browser state containing the user's selected locations, synchronization
-outcomes, current search text, and displayed search matches. It is not persisted as a
-separate database entity.
+Ephemeral browser state containing synchronization outcomes, current search text, and
+displayed search matches. The shared saved-location list is loaded from
+`weather_saved_locations`; only saved-location IDs are included in sync requests.
+
+## Saved-location removal
+
+During sync, upsert each source document and add its saved-location association in the
+same transaction. Remove a saved location, its associations, and any documents that
+become unreferenced in one database transaction. Delete orphaned `weather_documents`
+rows after removing the location's associations; the
+`weather_embeddings.document_id` foreign key cascades deletion to all corresponding
+chunks and vectors. If another saved location still references a document, retain the
+document and its chunks and return only the remaining location labels in search results.
+A failure rolls back the complete operation so the location and associations remain
+available for retry.
 
 ## Lifecycle
 
@@ -126,12 +165,22 @@ the hash used for embedding and that the model/chunking configuration is still a
 otherwise roll back. Search excludes the document while it is `pending` or `stale`. A
 failed computation or transaction leaves it excluded and retryable.
 
+Search aggregates associated saved-location labels for each document. It excludes
+documents without a current location association, even if an embedding row remains due
+to an inconsistent or interrupted legacy state. Aggregate labels before applying the
+result limit so a document linked to multiple locations still produces one search match
+per chunk.
+
 ## Validation Rules
 
 - Reject coordinates outside geographic bounds or outside NWS-supported locations.
 - Reject city/state values that are missing, ambiguous, or absent from the Gazetteer.
 - Do not create a document without usable narrative text.
 - Require forecast period start/end for forecast IDs.
+- Require NWS grid ID and grid coordinates for forecast documents.
+- Require each searchable document to have at least one saved-location association.
+- Require location removal to remove the location and garbage-collect unreferenced
+  documents and their chunks in one transaction.
 - Require exactly 384 numeric vector values and the configured model revision.
 - Require the active model revision and chunking configuration for every searchable
   document.

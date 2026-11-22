@@ -8,11 +8,25 @@ Databricks credentials, or build step in local development.
 
 ## Location synchronization
 
-- Users can add and remove one or more U.S. locations.
-- A location is either a city/state name or a latitude/longitude pair.
-- The page validates required input before sending a request and displays validation
-  errors next to the relevant controls.
-- The Sync action submits all selected locations to `POST /weather/sync`.
+- On page load, the frontend requests `GET /weather/locations` and displays the persisted
+  list shared by authorized users of that deployment.
+- The page provides one location-entry form with an accessible choice between city/state
+  and latitude/longitude input modes; it shows only the controls for the selected mode.
+- After validating the active form, Add sends the location to `POST /weather/locations`.
+  The new item appears in the shared list only after the server confirms it was saved.
+- Each saved item is a readable, display-only item with its own Remove action. Add and
+  remove changes are visible to other users on their next list refresh.
+- Remove calls `DELETE /weather/locations/{location_id}`. On success, the item is removed
+  from the list, unreferenced weather documents and their chunks/vectors are deleted,
+  and documents still used by another saved location are retained. The response can
+  report deleted-document/chunk and retained-shared-document counts.
+- If adding or removing fails, the page displays an error and does not present the
+  unsuccessful change as saved or complete. A failed removal leaves the item available
+  for retry.
+- Editing an existing item requires removing and adding it again.
+- The page validates required input before adding it and displays validation errors next
+  to the relevant controls. An empty selected-location list cannot be synchronized.
+- The Sync action submits only the saved location IDs to `POST /weather/sync`.
 - While a request is pending, the page indicates progress and prevents duplicate
   submissions of the same action.
 - After completion, the page displays the result for each location, including status,
@@ -27,9 +41,9 @@ Databricks credentials, or build step in local development.
   `POST /weather/search`; the interface uses the endpoint's default result count.
 - While a search is pending, the page indicates progress and prevents duplicate
   submissions of that action.
-- Results are shown in returned relevance order. Each result displays the location,
-  source type, headline when available, matched chunk text, similarity, synchronization
-  time, and applicable issue/effective or forecast-period timestamps.
+- Results are shown in returned relevance order. Each result displays all associated
+  saved locations, source type, headline when available, matched chunk text, similarity,
+  synchronization time, and applicable issue/effective or forecast-period timestamps.
 - The displayed freshness fields map to `source_type`, `synced_at`, `issued_at`,
   `effective_at`, `period_start`, and `period_end` from the search response.
 - Embedding remains a separate documented batch-process step; the page does not launch
