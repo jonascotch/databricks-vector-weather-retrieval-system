@@ -4,6 +4,7 @@
   const cityFields = document.querySelector("#city-state-fields");
   const coordinateFields = document.querySelector("#coordinate-fields");
   const cityInput = document.querySelector("#city-state");
+  const suggestionsList = document.querySelector("#place-suggestions");
   const latitudeInput = document.querySelector("#latitude");
   const longitudeInput = document.querySelector("#longitude");
   const locationError = document.querySelector("#location-error");
@@ -22,6 +23,11 @@
   const selectedLocations = [];
   let busy = false;
   let searching = false;
+  let selectedPlace = null;
+  let currentSuggestions = [];
+  let activeSuggestion = -1;
+  let suggestionTimer = 0;
+  let suggestionSequence = 0;
 
   function currentMode() {
     return modeInputs.find((input) => input.checked).value;
@@ -69,6 +75,110 @@
       throw new Error(data.error?.message || "The request failed.");
     }
     return data;
+  }
+
+  function hideSuggestions() {
+    suggestionsList.replaceChildren();
+    suggestionsList.hidden = true;
+    currentSuggestions = [];
+    activeSuggestion = -1;
+  }
+
+  function renderSuggestions(places) {
+    currentSuggestions = places;
+    activeSuggestion = -1;
+    suggestionsList.replaceChildren();
+    if (!places.length) {
+      suggestionsList.hidden = true;
+      return;
+    }
+    for (const place of places) {
+      const item = document.createElement("li");
+      item.textContent = `${place.name}, ${place.state}`;
+      item.setAttribute("role", "option");
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        selectPlace(place);
+      });
+      suggestionsList.append(item);
+    }
+    suggestionsList.hidden = false;
+  }
+
+  function selectPlace(place) {
+    selectedPlace = place;
+    cityInput.value = `${place.name}, ${place.state}`;
+    hideSuggestions();
+  }
+
+  async function loadSuggestions() {
+    const query = cityInput.value.trim();
+    const normalized = query.replace(/\s+/g, " ").toLowerCase();
+    if (normalized.length < 2) {
+      hideSuggestions();
+      return;
+    }
+    const sequence = ++suggestionSequence;
+    try {
+      const data = await requestJson(
+        `/weather/places?q=${encodeURIComponent(query)}`,
+      );
+      if (
+        sequence === suggestionSequence &&
+        currentMode() === "city-state" &&
+        !selectedPlace
+      ) {
+        renderSuggestions(data.places || []);
+      }
+    } catch {
+      if (sequence === suggestionSequence) {
+        hideSuggestions();
+      }
+    }
+  }
+
+  function scheduleSuggestions() {
+    selectedPlace = null;
+    window.clearTimeout(suggestionTimer);
+    suggestionTimer = window.setTimeout(loadSuggestions, 200);
+  }
+
+  function moveActiveSuggestion(offset) {
+    if (!currentSuggestions.length) {
+      return;
+    }
+    activeSuggestion =
+      (activeSuggestion + offset + currentSuggestions.length) %
+      currentSuggestions.length;
+    [...suggestionsList.querySelectorAll("li")].forEach((item, index) => {
+      item.classList.toggle("active", index === activeSuggestion);
+    });
+  }
+
+  function chooseActiveSuggestion() {
+    if (!currentSuggestions.length) {
+      return;
+    }
+    const index = activeSuggestion >= 0 ? activeSuggestion : 0;
+    selectPlace(currentSuggestions[index]);
+  }
+
+  function handleSuggestionKeys(event) {
+    if (suggestionsList.hidden) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActiveSuggestion(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActiveSuggestion(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      chooseActiveSuggestion();
+    } else if (event.key === "Escape") {
+      hideSuggestions();
+    }
   }
 
   function renderSelectedLocations() {
@@ -120,18 +230,17 @@
 
   function getLocationInput() {
     if (currentMode() === "city-state") {
-      const cityState = cityInput.value.trim();
-      const parts = cityState.split(",");
-      if (
-        parts.length !== 2 ||
-        !parts[0].trim() ||
-        !/^[A-Za-z]{2}$/.test(parts[1].trim())
-      ) {
-        throw new Error(
-          "Enter a city and two-letter state abbreviation, such as Chicago, IL.",
-        );
+      if (selectedPlace) {
+        return {
+          name: selectedPlace.name,
+          state: selectedPlace.state,
+          lat: selectedPlace.latitude,
+          lon: selectedPlace.longitude,
+        };
       }
-      return `${parts[0].trim()}, ${parts[1].trim().toUpperCase()}`;
+      throw new Error(
+        "Start typing a city and choose a suggested place before adding it.",
+      );
     }
 
     const latitude = latitudeInput.value.trim();
@@ -173,6 +282,8 @@
       });
       selectedLocations.push(data.location);
       locationEntryForm.reset();
+      selectedPlace = null;
+      hideSuggestions();
       updateLocationMode();
       syncResults.replaceChildren();
       syncStatus.textContent = "";
@@ -361,6 +472,7 @@
   for (const input of modeInputs) {
     input.addEventListener("change", () => {
       updateLocationMode();
+      hideSuggestions();
       locationError.textContent = "";
     });
   }
@@ -369,6 +481,11 @@
       locationError.textContent = "";
     });
   }
+  cityInput.addEventListener("input", scheduleSuggestions);
+  cityInput.addEventListener("keydown", handleSuggestionKeys);
+  cityInput.addEventListener("blur", () => {
+    window.setTimeout(hideSuggestions, 150);
+  });
   locationEntryForm.addEventListener("submit", addLocation);
   syncButton.addEventListener("click", syncWeather);
   searchForm.addEventListener("submit", searchWeather);

@@ -114,6 +114,26 @@ def get_saved_location(location_id: UUID) -> dict | None:
             return cursor.fetchone()
 
 
+def search_weather_places(query: str, limit: int) -> list[dict]:
+    """Return Gazetteer places whose normalized names begin with the query."""
+    escaped = (
+        query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT name, state, latitude, longitude
+                FROM weather.weather_places
+                WHERE name_normalized LIKE %s ESCAPE '\\'
+                ORDER BY length(name_normalized), name_normalized, state
+                LIMIT %s
+                """,
+                (escaped + "%", limit),
+            )
+            return list(cursor.fetchall())
+
+
 def create_saved_location(
     input_type: str, input_value: object, display_location: str
 ) -> dict:

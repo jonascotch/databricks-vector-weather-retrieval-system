@@ -16,6 +16,7 @@ from lakebase import (
     delete_saved_location,
     list_saved_locations,
     search_weather_embeddings,
+    search_weather_places,
     update_saved_location_resolution,
     upsert_weather_documents,
 )
@@ -76,7 +77,7 @@ def _search_match_response(row: dict) -> dict:
     return response
 
 
-def _parse_location_input(value) -> tuple[str, object, str]:
+def _parse_location_input(value) -> tuple[str, object, str, dict | None]:
     if isinstance(value, str):
         parts = value.split(",")
         if len(parts) != 2:
@@ -89,7 +90,41 @@ def _parse_location_input(value) -> tuple[str, object, str]:
                 "Enter a city and two-letter state abbreviation, such as Chicago, IL."
             )
         canonical = f"{city}, {state.upper()}"
-        return "city_state", canonical, canonical
+        return "city_state", canonical, canonical, None
+
+    if isinstance(value, dict) and set(value) == {"name", "state", "lat", "lon"}:
+        name = value["name"]
+        state = value["state"]
+        if not isinstance(name, str) or not name.strip():
+            raise LocationValidationError("Place name must be a non-empty string.")
+        if not isinstance(state, str) or not re.fullmatch(
+            r"[A-Za-z]{2}", state.strip()
+        ):
+            raise LocationValidationError("State must be a two-letter abbreviation.")
+        place_coordinates = {}
+        for key, label, minimum, maximum in (
+            ("lat", "Latitude", -90, 90),
+            ("lon", "Longitude", -180, 180),
+        ):
+            raw_number = value[key]
+            if isinstance(raw_number, bool) or not isinstance(raw_number, (int, float)):
+                raise LocationValidationError(f"{label} must be a number.")
+            try:
+                number = float(raw_number)
+            except OverflowError:
+                raise LocationValidationError(f"{label} must be a finite number.") from None
+            if not math.isfinite(number) or not minimum <= number <= maximum:
+                raise LocationValidationError(
+                    f"{label} must be between {minimum:g} and {maximum:g}."
+                )
+            place_coordinates[key] = round(number, 4)
+        display = f"{' '.join(name.split())}, {state.strip().upper()}"
+        return (
+            "coordinates",
+            place_coordinates,
+            display,
+            {"latitude": place_coordinates["lat"], "longitude": place_coordinates["lon"]},
+        )
 
     if not isinstance(value, dict) or set(value) != {"lat", "lon"}:
         raise LocationValidationError(
@@ -113,7 +148,7 @@ def _parse_location_input(value) -> tuple[str, object, str]:
             )
         coordinates[key] = round(number, 4)
     label = f"{coordinates['lat']:.4f}, {coordinates['lon']:.4f}"
-    return "coordinates", coordinates, label
+    return "coordinates", coordinates, label, None
 
 
 @app.get("/")
@@ -134,13 +169,43 @@ def saved_locations():
     return jsonify({"locations": [_location_response(row) for row in locations]})
 
 
+@app.get("/weather/places")
+def place_suggestions():
+    normalized = " ".join(
+        request.args.get("q", "").casefold().split()
+    )
+    if len(normalized) < 2:
+        return jsonify({"places": []})
+    try:
+        places = search_weather_places(normalized, 8)
+    except psycopg2.Error as error:
+        logger.error(
+            "Place suggestions failed: category=database error_type=%s",
+            type(error).__name__,
+        )
+        return _error("database_unavailable", "Place suggestions are unavailable.", 503)
+    return jsonify(
+        {
+            "places": [
+                {
+                    "name": place["name"],
+                    "state": place["state"],
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                }
+                for place in places
+            ]
+        }
+    )
+
+
 @app.post("/weather/locations")
 def add_saved_location():
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or set(body) != {"location"}:
         return _error("invalid_request", "Provide a location value.", 400)
     try:
-        input_type, input_value, display_location = _parse_location_input(
+        input_type, input_value, display_location, resolution = _parse_location_input(
             body["location"]
         )
     except LocationValidationError as error:
@@ -148,6 +213,8 @@ def add_saved_location():
 
     try:
         row = create_saved_location(input_type, input_value, display_location)
+        if resolution is not None:
+            row = update_saved_location_resolution(row["id"], resolution)
     except psycopg2.Error as error:
         logger.error(
             "Saved-location creation failed: category=database error_type=%s",

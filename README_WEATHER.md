@@ -94,6 +94,21 @@ injects the `PG*` settings and managed app identity for the database resource; t
 requests a fresh Lakebase OAuth credential for each new connection. Do not copy
 credentials or tokens into files.
 
+Populate the shared places table used by the city autocomplete before the
+first deployment (or to refresh it after a new Gazetteer release). The loader
+creates `weather.weather_places` when missing and refreshes it idempotently;
+run it as a database owner, and apply the deployment grants once so the app
+role can read the table:
+
+```bash
+python notebooks/ingest_weather_places.py
+```
+
+Alternatively, create the empty table with `sql/weather_places.sql` and load it
+with the same notebook. The Census Gazetteer release is downloaded directly, so
+`data/us_places.txt` is not needed for the autocomplete flow; picked places are
+saved with their Gazetteer coordinates and synchronized without the local file.
+
 Run the shared schema or versioned migration as a database owner/admin, then grant the
 app service-principal role the schema, table, and sequence privileges described in
 `specs/001-weather-vector-search/deployment.md`. Use Databricks workspace authentication

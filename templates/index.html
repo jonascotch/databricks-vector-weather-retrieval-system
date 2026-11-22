@@ -17,7 +17,7 @@
 
       <section aria-labelledby="locations-heading">
         <h2 id="locations-heading">Locations</h2>
-        <p class="hint">Add city/state locations or latitude/longitude coordinates to the shared saved list.</p>
+        <p class="hint">Start typing a city to pick from suggestions, or enter latitude/longitude coordinates.</p>
         <form id="location-entry-form" novalidate>
           <fieldset class="location-mode">
             <legend>Location input type</legend>
@@ -34,7 +34,8 @@
           </fieldset>
           <div id="city-state-fields" class="entry-fields">
             <label for="city-state">City, state</label>
-            <input id="city-state" name="city-state" type="text" autocomplete="address-level2" placeholder="Chicago, IL">
+            <input id="city-state" name="city-state" type="text" autocomplete="off" placeholder="Start typing a city, such as Chicago">
+            <ul id="place-suggestions" class="place-suggestions" role="listbox" hidden></ul>
           </div>
           <div id="coordinate-fields" class="entry-fields coordinate-fields" hidden>
             <label for="latitude">Latitude

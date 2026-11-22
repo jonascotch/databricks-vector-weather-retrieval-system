@@ -4,6 +4,6 @@ command:
   - exec gunicorn --bind "0.0.0.0:${DATABRICKS_APP_PORT}" app:app
 env:
   - name: LAKEBASE_ENDPOINT
-    value: "projects/<project-id>/branches/<branch-id>/endpoints/<endpoint-id>"
+    value: "projects/databricks-vector-weather-retrieval-system/branches/production/endpoints/primary"
   - name: NWS_USER_AGENT
-    value: "weather-vector-search/1.0 (contact: replace-with-your-email@example.com)"
+    value: "weather-vector-search/1.0 (contact: joaopbpires@gmail.com)"
