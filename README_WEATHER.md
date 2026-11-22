@@ -15,7 +15,11 @@ semantic search through `pgvector`.
    request attempts per sync, including retries. The request uses a descriptive
    `NWS_USER_AGENT`; alert requests are paced at no more than one per 30 seconds per
    process.
-3. Run the batch embedding process after synchronization:
+3. Synchronization embeds new narrative chunks before responding, so newly
+   synchronized documents are immediately searchable. The first sync after a
+   cold start also downloads the encoder model and can take about a minute
+   longer. The same reconciliation is available as a standalone batch for
+   catch-up or scheduled runs:
 
    ```bash
    docker compose exec app python notebooks/ingest_weather_embeddings.py
@@ -120,7 +124,8 @@ provide anonymous/public access.
 - U.S. locations, current point-specific alerts, and current daily/hourly forecasts only.
 - City/state lookup requires an exact, unambiguous Gazetteer match; coordinates are the
   alternative for ambiguous or absent place names.
-- Embedding is a separate batch step and is not launched by the browser.
+- Embedding runs as part of synchronization; a standalone notebook remains for
+  catch-up and scheduled runs.
 - No forecast history, scheduled synchronization, answer generation, or performance SLO
   is included.
 - Automated tests are waived for this learning exercise by spec FR-027. The manual

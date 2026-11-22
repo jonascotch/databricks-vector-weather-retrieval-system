@@ -419,7 +419,7 @@
       });
       if (data.matches.length === 0) {
         searchStatus.textContent =
-          "No searchable matches yet. Synchronize weather and run the embedding batch process first.";
+          "No searchable matches yet. Synchronize weather first; new documents become searchable once embedding completes.";
         return;
       }
       for (const match of data.matches) {
@@ -460,7 +460,14 @@
       for (const result of data.locations || []) {
         appendResult(result);
       }
-      syncStatus.textContent = `${data.documents_synced} documents synchronized.`;
+      let syncMessage = `${data.documents_synced} documents synchronized.`;
+      if (data.embedding?.status === "completed") {
+        syncMessage += ` ${data.embedding.documents_embedded} documents embedded and searchable.`;
+      } else if (data.embedding?.status === "failed") {
+        syncMessage +=
+          " Embedding did not complete; run the embedding notebook to make the latest documents searchable.";
+      }
+      syncStatus.textContent = syncMessage;
     } catch (error) {
       syncStatus.textContent = error.message;
     } finally {

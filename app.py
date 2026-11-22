@@ -25,6 +25,7 @@ from weather_client import (
     WeatherClient,
     WeatherClientError,
 )
+from weather_embedding_batch import reconcile_pending_embeddings
 from weather_embeddings import (
     MODEL_NAME,
     MODEL_REVISION,
@@ -436,12 +437,48 @@ def sync_weather():
         ) else 502
         return jsonify({"documents_synced": documents_synced, "locations": outcomes}), status
 
+    embedding = None
+    try:
+        embedding = reconcile_pending_embeddings()
+        logger.info(
+            "Weather sync embedding completed: operation=embed documents=%d chunks_reused=%d chunks_created=%d",
+            embedding["documents_processed"],
+            embedding["chunks_reused"],
+            embedding["chunks_created"],
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        logger.error(
+            "Weather sync embedding failed: category=encoder error_type=%s",
+            type(error).__name__,
+        )
+    except psycopg2.Error as error:
+        logger.error(
+            "Weather sync embedding failed: category=database error_type=%s",
+            type(error).__name__,
+        )
+
     logger.info(
         "Weather sync completed: operation=sync locations=%d documents=%d",
         len(location_ids),
         documents_synced,
     )
-    return jsonify({"documents_synced": documents_synced, "locations": outcomes})
+    response = {"documents_synced": documents_synced, "locations": outcomes}
+    if embedding is None:
+        response["embedding"] = {
+            "status": "failed",
+            "message": (
+                "Embedding did not complete. Run notebooks/ingest_weather_embeddings.py "
+                "to embed the pending documents."
+            ),
+        }
+    else:
+        response["embedding"] = {
+            "status": "completed",
+            "documents_embedded": embedding["documents_processed"],
+            "chunks_reused": embedding["chunks_reused"],
+            "chunks_created": embedding["chunks_created"],
+        }
+    return jsonify(response)
 
 
 @app.post("/weather/search")
